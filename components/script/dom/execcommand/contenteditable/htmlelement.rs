@@ -264,6 +264,9 @@ impl HTMLElement {
         }
         let _ = range.SetStart(cx.no_gc(), &selected_node, selected_offset);
         let _ = range.SetEnd(cx.no_gc(), &selected_node, selected_offset);
+        // `Selection.addRange` は、すでに範囲があると何もしない(仕様:rangeCount が 0 でなければ中止)。
+        // Tab などで別の編集可能な要素から移ったときも、新しい要素へキャレットが移るように、先に空にする。
+        selection.RemoveAllRanges(cx.no_gc());
         selection.AddRange(cx.no_gc(), &range);
     }
 }
