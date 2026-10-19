@@ -43,6 +43,7 @@ use script_bindings::reflector::{
 };
 use script_traits::{DocumentActivity, MouseButtons};
 use servo_base::id::PipelineId;
+use script_bindings::codegen::GenericBindings::UIEventBinding::UIEventMethods;
 use servo_base::text::Utf32CodeUnitsOrNodeOffset;
 use servo_config::pref;
 use smallvec::SmallVec;
@@ -123,7 +124,7 @@ use crate::dom::servoparser::serialize_html_fragment;
 use crate::dom::shadowroot::{IsUserAgentWidget, ShadowRoot};
 use crate::dom::text::Text;
 use crate::dom::traversal::LightDomNoGcTraversal;
-use crate::dom::types::{CDATASection, KeyboardEvent, MouseEvent, ProcessingInstruction};
+use crate::dom::types::{CDATASection, KeyboardEvent, MouseEvent, ProcessingInstruction, UIEvent};
 use crate::dom::window::Window;
 use crate::drag::document_selection_drag::{
     DocumentSelectionDragHandler, adjust_anchor_for_user_select,
@@ -4649,6 +4650,19 @@ impl VirtualMethods for Node {
             return;
         };
         selection.collapse_to_dom_position(cx, &container, offset);
+
+        // A double click selects the word under the pointer and a triple click selects the
+        // block that contains it. `<input>` and `<textarea>` do this themselves in
+        // `TextInput::handle_mousedown_event`; this handles the rest of the document,
+        // including `contenteditable` hosts.
+        let click_count = event.upcast::<UIEvent>().Detail();
+        if click_count >= 2 &&
+            select_word_or_block(cx, &selection, &container, offset, click_count)
+        {
+            event.upcast::<Event>().mark_as_handled();
+            return;
+        }
+
         document
             .event_handler()
             .install_drag_gesture(DragGesture::new(DragHandler::DocumentSelection(
@@ -4656,6 +4670,116 @@ impl VirtualMethods for Node {
             )));
         event.upcast::<Event>().mark_as_handled();
     }
+}
+
+/// Select the word (`click_count == 2`) or the block (`click_count >= 3`) at the given position.
+/// Returns `true` if the selection was changed.
+fn select_word_or_block(
+    cx: &mut JSContext,
+    selection: &crate::dom::selection::Selection,
+    container: &Node,
+    offset: Utf32CodeUnitsOrNodeOffset,
+    click_count: i32,
+) -> bool {
+    if click_count >= 3 {
+        let Some(block) = container
+            .inclusive_ancestors(ShadowIncluding::No)
+            .find(|node| node.is_block_node())
+        else {
+            return false;
+        };
+        return selection.SelectAllChildren(cx, &block).is_ok();
+    }
+
+    if !container.is::<Text>() {
+        return false;
+    }
+    let Some(character_data) = container.downcast::<CharacterData>() else {
+        return false;
+    };
+    let utf16_offset = container.to_sibling_or_utf16_offset(offset);
+    let Some((start, end)) = word_boundaries_utf16(&character_data.data(), utf16_offset) else {
+        return false;
+    };
+    selection
+        .SetBaseAndExtent(cx, container, start, container, end)
+        .is_ok()
+}
+
+/// The UTF-16 code unit range of the word at `utf16_offset` in `data`. At the end of the text, this
+/// is the last word.
+///
+/// A run of Hiragana, of Katakana or of Han characters is treated as one word, since Unicode word
+/// boundaries (UAX #29) split Hiragana and Han into single characters. Everything else follows
+/// UAX #29.
+fn word_boundaries_utf16(data: &str, utf16_offset: u32) -> Option<(u32, u32)> {
+    use unicode_script::{Script, UnicodeScript};
+    use unicode_segmentation::UnicodeSegmentation;
+
+    // 0 = other, 1 = Hiragana, 2 = Katakana, 3 = Han.
+    fn group(c: char) -> u8 {
+        match c.script() {
+            Script::Hiragana => 1,
+            Script::Katakana => 2,
+            Script::Han => 3,
+            _ if c == '々' => 3,
+            _ => 0,
+        }
+    }
+
+    let mut chars: Vec<(u32, char)> = Vec::new();
+    let mut position = 0u32;
+    for c in data.chars() {
+        chars.push((position, c));
+        position += c.len_utf16() as u32;
+    }
+    let total = position;
+    if chars.is_empty() {
+        return None;
+    }
+    // The character containing the offset (the last one, at the end of the text).
+    let index = chars
+        .iter()
+        .rposition(|(start, _)| *start <= utf16_offset)
+        .unwrap_or(0);
+
+    // The prolonged sound mark belongs to the run it follows.
+    let mut groups: Vec<u8> = Vec::with_capacity(chars.len());
+    for (_, c) in &chars {
+        let g = if *c == 'ー' {
+            groups.last().copied().filter(|g| *g == 1 || *g == 2).unwrap_or(2)
+        } else {
+            group(*c)
+        };
+        groups.push(g);
+    }
+
+    if groups[index] != 0 {
+        let g = groups[index];
+        let mut start = index;
+        while start > 0 && groups[start - 1] == g {
+            start -= 1;
+        }
+        let mut end = index;
+        while end + 1 < chars.len() && groups[end + 1] == g {
+            end += 1;
+        }
+        let end_position = chars.get(end + 1).map(|(p, _)| *p).unwrap_or(total);
+        return Some((chars[start].0, end_position));
+    }
+
+    // Otherwise, the UAX #29 word (or separator) segment containing the offset.
+    let mut position = 0u32;
+    let mut last = None;
+    for segment in data.split_word_bounds() {
+        let end = position + segment.encode_utf16().count() as u32;
+        if utf16_offset < end {
+            return Some((position, end));
+        }
+        last = Some((position, end));
+        position = end;
+    }
+    last
 }
 
 /// A summary of the changes that happened to a node.
