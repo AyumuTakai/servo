@@ -1678,6 +1678,9 @@ impl DocumentEventHandler {
         };
 
         let cancelable = composition_event.state == keyboard_types::CompositionState::Start;
+        let committed_text = (composition_event.state == keyboard_types::CompositionState::End &&
+            !composition_event.data.is_empty())
+        .then(|| composition_event.data.clone());
         let event = CompositionEvent::new(
             cx,
             &self.window,
@@ -1691,6 +1694,20 @@ impl DocumentEventHandler {
 
         let event = event.upcast::<Event>();
         event.fire(cx, focused_element.upcast());
+
+        // `<input>` and `<textarea>` insert the committed text themselves, when they handle
+        // `compositionend`. A `contenteditable` host has no such default action, so insert the
+        // committed text there, the same way as typed text.
+        if let Some(text) = committed_text &&
+            focused_element
+                .downcast::<HTMLElement>()
+                .is_some_and(|element| element.is_editing_host())
+        {
+            document
+                .editing_context(cx.no_gc(), focused_element.upcast::<Node>())
+                .perform_editing_action(cx, embedder_traits::EditingAction::InsertText(text));
+        }
+
         event.flags().into()
     }
 
