@@ -90,7 +90,10 @@ impl GStreamerBackend {
             });
         }
 
+        // Embedders that know their platform's VA-API driver works can keep the va plugins
+        // (hardware decoding) by setting `SERVO_MEDIA_KEEP_VA`.
         #[cfg(target_os = "linux")]
+        if std::env::var_os("SERVO_MEDIA_KEEP_VA").is_none()
         {
             // Remove the va plugins that have some issues on certain platforms.
             // When the driver is fixed we will remove this.
