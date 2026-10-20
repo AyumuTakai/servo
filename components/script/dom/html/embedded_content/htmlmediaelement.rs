@@ -348,16 +348,38 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                 if current_frame.width == frame.get_width() &&
                     current_frame.height == frame.get_height() =>
             {
-                if !frame.is_gl_texture() {
-                    updates.push(ImageUpdate::UpdateImage(
-                        current_frame.image_key,
-                        descriptor,
-                        SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
-                            frame.get_data(),
-                        )),
-                        None,
-                    ));
-                }
+                // A GL texture frame must be announced too: without an image update WebRender does not
+                // build a new frame, so the new video frame is only picked up when something else
+                // repaints the page (the video then advances in jumps, e.g. every 500 ms).
+                let gl_frame_id = self
+                    .glplayer_id
+                    .read()
+                    .unwrap()
+                    .filter(|_| frame.is_gl_texture());
+                let image_data = match gl_frame_id {
+                    Some(glplayer_id) => {
+                        let texture_target = if frame.is_external_oes() {
+                            ImageBufferKind::TextureExternal
+                        } else {
+                            ImageBufferKind::Texture2D
+                        };
+                        SerializableImageData::External(ExternalImageData {
+                            id: ExternalImageId(glplayer_id),
+                            channel_index: 0,
+                            image_type: ExternalImageType::TextureHandle(texture_target),
+                            normalized_uvs: false,
+                        })
+                    },
+                    None => SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
+                        frame.get_data(),
+                    )),
+                };
+                updates.push(ImageUpdate::UpdateImage(
+                    current_frame.image_key,
+                    descriptor,
+                    image_data,
+                    None,
+                ));
 
                 self.current_frame_holder
                     .get_or_insert_with(|| FrameHolder::new(frame.clone()))
