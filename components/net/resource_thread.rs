@@ -268,6 +268,25 @@ impl ResourceChannelManager {
             embedder_proxy,
         );
 
+        // The cookie jar is otherwise written only on a clean exit (`CoreResourceMsg::Exit`), which an
+        // embedder that is stopped by a signal never reaches: save it periodically when it changed.
+        if let Some(config_dir) = self.config_dir.clone() {
+            let state = public_http_state.clone();
+            let _ = std::thread::Builder::new()
+                .name("CookieFlush".to_owned())
+                .spawn(move || {
+                    let mut last = String::new();
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(10));
+                        let now = format!("{:?}", &*state.cookie_jar.read());
+                        if now != last {
+                            servo_base::write_json_to_file(&*state.cookie_jar.read(), &config_dir, "cookie_jar.json");
+                            last = now;
+                        }
+                    }
+                });
+        }
+
         let mut rx_set = GenericReceiverSet::new();
         let private_id = rx_set.add(private_receiver);
         let public_id = rx_set.add(public_receiver);
