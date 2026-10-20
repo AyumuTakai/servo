@@ -354,6 +354,9 @@ pub struct Preferences {
     pub network_http_disk_cache: String,
     /// Maximum size of the disk cache file in bytes.
     pub network_http_disk_cache_size: u64,
+    /// Directory that receives downloads (responses with `Content-Disposition: attachment` or a type
+    /// that cannot be displayed). An empty string disables downloads (the old behaviour).
+    pub network_download_dir: String,
     /// A url for a http proxy. We treat an empty string as no proxy.
     pub network_http_proxy_uri: String,
     /// A url for a https proxy. We treat an empty string as no proxy.
@@ -576,6 +579,7 @@ impl Preferences {
             network_http_cache_disabled: false,
             network_http_disk_cache: String::new(),
             network_http_disk_cache_size: 1024 * 1024 * 100, // Roughtly 100MB
+            network_download_dir: String::new(),
             network_http_proxy_uri: String::new(),
             network_https_proxy_uri: String::new(),
             network_http_no_proxy: String::new(),

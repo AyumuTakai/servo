@@ -3125,12 +3125,18 @@ impl ScriptThread {
 
     /// We have received notification that the response associated with a load has completed.
     /// Kick off the document and frame tree creation process using the result.
+    /// A sender for messages to the embedder (used by downloads, which outlive the document).
+    pub(crate) fn embedder_sender(&self) -> embedder_traits::ScriptToEmbedderChan {
+        self.senders.pipeline_to_embedder_sender.clone()
+    }
+
     pub(crate) fn handle_page_headers_available(
         &self,
         webview_id: WebViewId,
         pipeline_id: PipelineId,
         metadata: Option<&Metadata>,
         origin: MutableOrigin,
+        abort_for_download: bool,
         cx: &mut js::context::JSContext,
     ) -> Option<DomRoot<Document>> {
         if self.closed_pipelines.borrow().contains(&pipeline_id) {
@@ -3151,10 +3157,11 @@ impl ScriptThread {
         // 2. If response's status is 204 or 205, then abort these steps.
         //
         // TODO: The specification has been updated and we no longer should abort.
-        let is_204_205 = match metadata {
-            Some(metadata) => metadata.status.in_range(204..=205),
-            _ => false,
-        };
+        let is_204_205 = abort_for_download ||
+            match metadata {
+                Some(metadata) => metadata.status.in_range(204..=205),
+                _ => false,
+            };
 
         if is_204_205 {
             // If we have an existing window that is being navigated:

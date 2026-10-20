@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use embedder_traits::{
-    AlertResponse, AllowOrDeny, AuthenticationResponse, BluetoothDeviceDescription,
+    AlertResponse, AllowOrDeny, DownloadEvent, AuthenticationResponse, BluetoothDeviceDescription,
     ConfirmResponse, ConsoleLogLevel, ContextMenuAction, ContextMenuElementInformation,
     ContextMenuItem, Cursor, EmbedderControlId, EmbedderControlResponse, FilePickerRequest,
     FilterPattern, InputEventId, InputEventResult, InputMethodType, LoadStatus, MediaSessionEvent,
@@ -979,6 +979,10 @@ pub trait WebViewDelegate {
     /// the page will enter or leave fullscreen state internally according to the [Fullscreen
     /// API](https://fullscreen.spec.whatwg.org/).
     fn notify_fullscreen_state_changed(&self, _webview: WebView, _is_fullscreen: bool) {}
+
+    /// A download started, advanced or finished. Downloads only happen when the
+    /// `network_download_dir` preference is set; see [`DownloadEvent`].
+    fn notify_download_event(&self, _webview: WebView, _event: DownloadEvent) {}
 
     /// Whether or not to allow a [`WebView`] to load a URL in its main frame or one of its
     /// nested `<iframe>`s. [`NavigationRequest`]s are accepted by default.
