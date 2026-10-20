@@ -7,7 +7,8 @@ use embedder_traits::{GenericEmbedderProxy, WebResourceRequest, WebResourceRespo
 use log::error;
 use net_traits::NetworkError;
 use net_traits::http_status::HttpStatus;
-use net_traits::request::Request;
+use ipc_channel::ipc;
+use net_traits::request::{BodyChunkRequest, BodyChunkResponse, Request};
 use net_traits::response::{Response, ResponseBody};
 
 use crate::embedder::NetToEmbedderMsg;
@@ -21,6 +22,33 @@ pub struct RequestInterceptor {
 impl RequestInterceptor {
     pub fn new(embedder_proxy: GenericEmbedderProxy<NetToEmbedderMsg>) -> RequestInterceptor {
         RequestInterceptor { embedder_proxy }
+    }
+
+    /// The whole request body, when the request is for the host named by the
+    /// `network_intercept_body_host` preference (the embedder serves it itself). The body stream
+    /// is consumed, so this is only done for a host the embedder is expected to intercept.
+    fn read_body_if_wanted(request: &Request) -> Option<Vec<u8>> {
+        let wanted = servo_config::pref!(network_intercept_body_host);
+        if wanted.is_empty() || request.url().host_str() != Some(wanted.as_str()) {
+            return None;
+        }
+        let stream = request.body.as_ref()?.clone_stream();
+        let mut guard = stream.lock();
+        let chunk_requester = guard.as_mut()?;
+        let (body_chan, body_port) = ipc::channel().ok()?;
+        chunk_requester
+            .send(BodyChunkRequest::Connect(body_chan))
+            .ok()?;
+        let mut out = Vec::new();
+        loop {
+            chunk_requester.send(BodyChunkRequest::Chunk).ok()?;
+            match body_port.recv().ok()? {
+                BodyChunkResponse::Chunk(bytes) => out.extend_from_slice(&bytes),
+                BodyChunkResponse::Done => break,
+                BodyChunkResponse::Error => return None,
+            }
+        }
+        Some(out)
     }
 
     pub async fn intercept_request(
@@ -39,6 +67,7 @@ impl RequestInterceptor {
             referrer_url: request.referrer.to_url().map(|url| url.as_url().clone()),
             is_for_main_frame,
             is_redirect: request.redirect_count > 0,
+            body: Self::read_body_if_wanted(request),
         };
 
         self.embedder_proxy

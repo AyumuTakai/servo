@@ -363,6 +363,9 @@ pub struct Preferences {
     /// Directory that receives downloads (responses with `Content-Disposition: attachment` or a type
     /// that cannot be displayed). An empty string disables downloads (the old behaviour).
     pub network_download_dir: String,
+    /// Host whose intercepted requests (`WebViewDelegate::load_web_resource`) carry the request body
+    /// in `WebResourceRequest::body`. Empty: no bodies are read.
+    pub network_intercept_body_host: String,
     /// A url for a http proxy. We treat an empty string as no proxy.
     pub network_http_proxy_uri: String,
     /// A url for a https proxy. We treat an empty string as no proxy.
@@ -587,6 +590,7 @@ impl Preferences {
             network_http_disk_cache: String::new(),
             network_http_disk_cache_size: 1024 * 1024 * 100, // Roughtly 100MB
             network_download_dir: String::new(),
+            network_intercept_body_host: String::new(),
             network_http_proxy_uri: String::new(),
             network_https_proxy_uri: String::new(),
             network_http_no_proxy: String::new(),

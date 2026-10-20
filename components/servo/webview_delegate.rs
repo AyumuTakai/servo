@@ -1225,6 +1225,7 @@ mod test {
             referrer_url: None,
             is_for_main_frame: false,
             is_redirect: false,
+            body: None,
         };
         let web_resource_response = || {
             WebResourceResponse::new(

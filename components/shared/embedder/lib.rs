@@ -716,6 +716,11 @@ pub struct WebResourceRequest {
     pub referrer_url: Option<Url>,
     pub is_for_main_frame: bool,
     pub is_redirect: bool,
+    /// The request body, read in full. Only filled for requests to the host named by the
+    /// `network_intercept_body_host` preference (an embedder that serves that host itself, e.g.
+    /// from an in-process server, needs POST/PUT bodies); `None` otherwise.
+    #[serde(default)]
+    pub body: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
