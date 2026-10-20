@@ -149,8 +149,12 @@ impl WindowGLContext {
         }
 
         let mut window_gl_context = WINDOW_GL_CONTEXT.lock().unwrap();
-        if window_gl_context.glplayer_thread_sender.is_some() {
-            warn!("Not going to initialize GL accelerated media playback more than once.");
+        // An embedder with several rendering contexts (several painters, all sharing one
+        // `WebRenderExternalImageIdManager`) gets one handler per painter, all talking to the
+        // same GL player thread.
+        if let Some(sender) = &window_gl_context.glplayer_thread_sender {
+            let image_handler = Box::new(GLPlayerExternalImages::new(sender.clone()));
+            external_image_handlers.set_handler(image_handler, WebRenderImageHandlerType::Media);
             return;
         }
 
