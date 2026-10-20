@@ -6753,6 +6753,35 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
         )
     }
 
+    /// Legacy WebKit/Blink extension: a collapsed range at the text position under the point (viewport
+    /// coordinates). Uses the same layout query that places the caret in a text control, so it also
+    /// works for text that is not in a `contenteditable`. `None` when the point has no text under it.
+    fn CaretRangeFromPoint(
+        &self,
+        cx: &mut JSContext,
+        x: Finite<f64>,
+        y: Finite<f64>,
+    ) -> Option<DomRoot<Range>> {
+        let element = self.ElementFromPoint(x, y)?;
+        let point = euclid::Point2D::<f32, style_traits::CSSPixel>::new(*x as f32, *y as f32)
+            .map(app_units::Au::from_f32_px);
+        let (node, offset) = self
+            .window
+            .text_index_query_on_node_for_event(element.upcast(), point)?;
+        // The layout offset counts Unicode code points; DOM range offsets are UTF-16 code units.
+        let offset = match node.downcast::<Text>() {
+            Some(text) => text
+                .upcast::<crate::dom::CharacterData>()
+                .data()
+                .chars()
+                .take(offset.0 as usize)
+                .map(char::len_utf16)
+                .sum::<usize>() as u32,
+            None => offset.0 as u32,
+        };
+        Some(Range::new(cx, self, &node, offset, &node, offset))
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#dom-document-elementsfrompoint>
     fn ElementsFromPoint(&self, x: Finite<f64>, y: Finite<f64>) -> Vec<DomRoot<Element>> {
         self.document_or_shadow_root.elements_from_point(
