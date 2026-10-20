@@ -251,6 +251,7 @@ pub(crate) trait TextControlElement {
     /// <https://html.spec.whatwg.org/multipage/#dom-textarea/input-setrangetext>
     fn set_dom_range_text(
         &self,
+        cx: &mut JSContext,
         replacement: DOMString,
         start: Option<Utf16CodeUnits>,
         end: Option<Utf16CodeUnits>,
@@ -396,6 +397,10 @@ pub(crate) trait TextControlElement {
             None,
             Some(original_selection_state),
         );
+
+        // The text changed: update the placeholder state, validity and the displayed
+        // contents (otherwise the control keeps showing the old text until the next edit).
+        self.handle_text_content_changed(cx);
         Ok(())
     }
 
