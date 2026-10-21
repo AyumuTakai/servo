@@ -23,7 +23,7 @@ use crate::dom::bindings::str::{DOMString, FromInputValueString};
 use crate::dom::document_embedder_controls::ControlElement;
 use crate::dom::element::attributes::storage::AttrRef;
 use crate::dom::element::{AttributeMutation, CustomElementCreationMode, Element, ElementCreator};
-use crate::dom::event::Event;
+use crate::dom::event::{Event, EventBubbles, EventCancelable, EventComposed};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::html::form_controls::htmlinputelement::HTMLInputElement;
 use crate::dom::html::form_controls::input_type::{SpecificInputActivationType, SpecificInputType};
@@ -57,6 +57,17 @@ impl ColorInputType {
             selected_color.red, selected_color.green, selected_color.blue
         );
         let _ = input.SetValue(cx, formatted_color.into());
+
+        // 利用者が色を選んだので、`input`・`change` を出す(ファイル選択の応答と同じ)。出さないと、ページの JS が、イベントで値を読むページで、反映されない。
+        let target = input.upcast::<EventTarget>();
+        target.fire_event_with_params(
+            cx,
+            atom!("input"),
+            EventBubbles::Bubbles,
+            EventCancelable::NotCancelable,
+            EventComposed::Composed,
+        );
+        target.fire_bubbling_event(cx, atom!("change"));
     }
 
     /// Get the shadow tree for this [`HTMLInputElement`], if it is created and valid, otherwise
