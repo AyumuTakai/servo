@@ -667,6 +667,13 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
                 let (source, size) = self.media_handler.as_mut().unwrap().lock(key.0);
                 let texture_id = match source {
                     ExternalImageSource::NativeTexture(b) => b,
+                    // The player did not answer (already unregistered, or gone): draw nothing.
+                    ExternalImageSource::Invalid => {
+                        return ExternalImage {
+                            uv: TexelRect::new(0.0, 0.0, 0.0, 0.0),
+                            source: ExternalImageSource::Invalid,
+                        };
+                    },
                     _ => panic!("Wrong type"),
                 };
                 ExternalImage {
