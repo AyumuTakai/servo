@@ -219,10 +219,32 @@ impl WebRenderExternalImageApi for GLPlayerExternalImages {
     fn lock(&mut self, id: u64) -> (ExternalImageSource<'_>, Size2D<i32>) {
         // The GLPlayerMsgForward::Lock message inserts a fence in the
         // GLPlayer command queue.
-        self.glplayer_channel
+        if self
+            .glplayer_channel
             .send(GLPlayerMsg::Lock(id, self.lock_channel.0.clone()))
-            .unwrap();
-        let (image_id, size, _gl_sync) = self.lock_channel.1.recv().unwrap();
+            .is_err()
+        {
+            return (ExternalImageSource::Invalid, Size2D::zero());
+        }
+        // Never wait forever: this runs on the thread that paints. A player that was already
+        // unregistered, or whose thread is gone, never answers (the embedder would hang). On a
+        // timeout, skip this image, and start a new channel so that a late answer cannot be
+        // taken for the answer to the next request.
+        let (image_id, size, _gl_sync) = match self
+            .lock_channel
+            .1
+            .try_recv_timeout(std::time::Duration::from_millis(200))
+        {
+            Ok(reply) => reply,
+            Err(_) => {
+                warn!("GLPlayer did not answer the lock request for image {id}");
+                self.lock_channel = generic_channel::channel().unwrap();
+                return (ExternalImageSource::Invalid, Size2D::zero());
+            },
+        };
+        if image_id == 0 {
+            return (ExternalImageSource::Invalid, size);
+        }
         // The next glWaitSync call is run on the WR thread and it's
         // used to synchronize the two flows of OpenGL commands in
         // order to avoid WR using a semi-ready GLPlayer texture.
@@ -234,6 +256,6 @@ impl WebRenderExternalImageApi for GLPlayerExternalImages {
     }
 
     fn unlock(&mut self, id: u64) {
-        self.glplayer_channel.send(GLPlayerMsg::Unlock(id)).unwrap();
+        let _ = self.glplayer_channel.send(GLPlayerMsg::Unlock(id));
     }
 }

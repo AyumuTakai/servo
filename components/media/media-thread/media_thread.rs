@@ -4,6 +4,8 @@
 
 use std::thread;
 
+use euclid::default::Size2D;
+
 use log::{trace, warn};
 use paint_api::{WebRenderExternalImageIdManager, WebRenderImageHandlerType};
 use rustc_hash::FxHashMap;
@@ -71,10 +73,15 @@ impl GLPlayerThread {
                     warn!("Tried to remove an unknown player");
                 }
             },
-            GLPlayerMsg::Lock(id, handler_sender) => {
-                if let Some(sender) = self.players.get(&id) {
+            GLPlayerMsg::Lock(id, handler_sender) => match self.players.get(&id) {
+                Some(sender) => {
                     sender.send(GLPlayerMsgForward::Lock(handler_sender)).ok();
-                }
+                },
+                // WebRender can still ask for an image whose player was unregistered. Always
+                // answer (texture 0 = nothing to draw); otherwise the painting thread waits forever.
+                None => {
+                    handler_sender.send((0, Size2D::zero(), 0)).ok();
+                },
             },
             GLPlayerMsg::Unlock(id) => {
                 if let Some(sender) = self.players.get(&id) {
