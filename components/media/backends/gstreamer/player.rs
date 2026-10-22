@@ -779,13 +779,21 @@ impl GStreamerPlayer {
                 let weak_video_renderer = Arc::downgrade(&video_renderer);
 
                 move |sample: gstreamer::Sample| {
-                    let Some(frame) = render.lock().unwrap().get_frame_from_sample(sample) else {
+                    // A panic in another thread must not take this streaming thread down too.
+                    let Some(frame) = render
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get_frame_from_sample(sample)
+                    else {
                         return Err(gstreamer::FlowError::Error);
                     };
 
                     match weak_video_renderer.upgrade() {
                         Some(video_renderer) => {
-                            video_renderer.lock().unwrap().render(frame);
+                            video_renderer
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .render(frame);
                         },
                         _ => {
                             return Err(gstreamer::FlowError::Flushing);

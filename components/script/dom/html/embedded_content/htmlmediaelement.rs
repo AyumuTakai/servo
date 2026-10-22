@@ -240,14 +240,22 @@ impl MediaFrameRenderer {
 
                 match message {
                     GLPlayerMsgForward::Lock(sender) => {
-                        if let Some(holder) = video_renderer
+                        // Always answer: the painting thread waits for this (it gives up after
+                        // a timeout, and then the receiver is gone, so ignore a failed send).
+                        match video_renderer
                             .lock()
                             .unwrap()
                             .current_frame_holder
-                            .as_mut() {
+                            .as_mut()
+                        {
+                            Some(holder) => {
                                 holder.lock();
-                                sender.send(holder.get()).unwrap();
-                            };
+                                let _ = sender.send(holder.get());
+                            },
+                            None => {
+                                let _ = sender.send((0, Default::default(), 0));
+                            },
+                        }
                     },
                     GLPlayerMsgForward::Unlock() => {
                         if let Some(holder) = video_renderer
