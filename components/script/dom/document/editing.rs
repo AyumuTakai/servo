@@ -22,12 +22,16 @@ use script_bindings::inheritance::Castable;
 use script_bindings::root::DomRoot;
 use script_bindings::str::DOMString;
 use servo_base::generic_channel::GenericCallback;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::dom::clipboardevent::ClipboardEventType;
 use crate::dom::event::{EventBubbles, EventCancelable};
 use crate::dom::execcommand::execcommands::DocumentExecCommandSupport;
 use crate::dom::text_control::TextControlElement;
 use crate::dom::text_input::{InputEventType, IsComposing};
+use crate::dom::characterdata::CharacterData;
+use crate::dom::iterators::ShadowIncluding;
+use crate::dom::text::Text;
 use crate::dom::types::{
     ClipboardEvent, DataTransfer, Event, EventTarget, HTMLInputElement, HTMLTextAreaElement,
 };
@@ -338,7 +342,9 @@ impl Document {
         // This function does not do any checks for whether or not we are actually inside an
         // editing host, since those checks are performed by exec_command_for_command_id either way.
         let (command, argument) = match editing_action {
-            EditingAction::MoveCursor(..) => return false,
+            EditingAction::MoveCursor(direction, motion, modify) => {
+                return self.move_document_caret(cx, *direction, *motion, *modify);
+            },
             EditingAction::SelectAll | EditingAction::Clipboard(_) => {
                 unreachable!("Should have been handled before this point.")
             },
@@ -800,4 +806,208 @@ pub(crate) fn editing_action_from_keyboard_event(
             _ => None,
         })
         .flatten()
+}
+
+/// A caret position inside a text node: the node and an offset in UTF-16 code units.
+type TextPosition = (DomRoot<Node>, u32);
+
+/// All the non-empty text nodes of an editing host, in tree order.
+fn text_nodes_of(host: &Node) -> Vec<DomRoot<Node>> {
+    host.traverse_preorder(ShadowIncluding::No)
+        .filter(|node| {
+            node.downcast::<Text>()
+                .is_some_and(|text| !text.upcast::<CharacterData>().data().is_empty())
+        })
+        .collect()
+}
+
+fn utf16_len(text: &str) -> u32 {
+    text.encode_utf16().count() as u32
+}
+
+/// The boundaries (in UTF-16 code units) between the graphemes of `text`, including 0 and the end.
+fn grapheme_boundaries(text: &str) -> Vec<u32> {
+    let mut boundaries = vec![0];
+    let mut at = 0;
+    for grapheme in text.graphemes(true) {
+        at += utf16_len(grapheme);
+        boundaries.push(at);
+    }
+    boundaries
+}
+
+fn text_of(node: &Node) -> String {
+    node.downcast::<Text>()
+        .map(|text| text.upcast::<CharacterData>().data().clone())
+        .unwrap_or_default()
+}
+
+/// Turn a selection point into a position inside a text node of the host, if there is one.
+fn text_position(host: &Node, node: &Node, offset: u32) -> Option<TextPosition> {
+    if node.is::<Text>() {
+        return Some((DomRoot::from_ref(node), offset));
+    }
+    // An element boundary: the point is before the `offset`-th child.
+    let children: Vec<DomRoot<Node>> = node.children().collect();
+    let texts_in = |n: &Node| text_nodes_of(n);
+    if let Some(child) = children.get(offset as usize) &&
+        let Some(first) = texts_in(child).into_iter().next()
+    {
+        return Some((first, 0));
+    }
+    if offset > 0 &&
+        let Some(child) = children.get(offset as usize - 1) &&
+        let Some(last) = texts_in(child).into_iter().last()
+    {
+        let len = utf16_len(&text_of(&last));
+        return Some((last, len));
+    }
+    let all = text_nodes_of(host);
+    all.into_iter().next().map(|first| (first, 0))
+}
+
+fn step_by_grapheme(host: &Node, from: TextPosition, forward: bool) -> TextPosition {
+    let (node, offset) = from;
+    let boundaries = grapheme_boundaries(&text_of(&node));
+    if forward {
+        if let Some(next) = boundaries.iter().find(|b| **b > offset) {
+            return (node, *next);
+        }
+    } else if let Some(previous) = boundaries.iter().rev().find(|b| **b < offset) {
+        return (node, *previous);
+    }
+    // Past the edge of this text node: continue into the neighbouring one.
+    let all = text_nodes_of(host);
+    let Some(index) = all.iter().position(|n| std::ptr::eq(&**n, &*node)) else {
+        return (node, offset);
+    };
+    if forward {
+        if let Some(next) = all.get(index + 1) {
+            let b = grapheme_boundaries(&text_of(next));
+            return (next.clone(), b.get(1).copied().unwrap_or(0));
+        }
+    } else if index > 0 {
+        let previous = &all[index - 1];
+        let b = grapheme_boundaries(&text_of(previous));
+        return (
+            previous.clone(),
+            b.get(b.len().saturating_sub(2)).copied().unwrap_or(0),
+        );
+    }
+    (node, offset)
+}
+
+fn step_by_word(host: &Node, from: TextPosition, forward: bool) -> TextPosition {
+    let (node, offset) = from;
+    let text = text_of(&node);
+    // UTF-16 offsets of the starts and ends of the words of this node.
+    let mut words = Vec::new();
+    let mut at = 0;
+    for (segment_is_word, segment) in text.split_word_bounds().map(|s| {
+        (s.chars().any(|c| c.is_alphanumeric()), s)
+    }) {
+        let len = utf16_len(segment);
+        if segment_is_word {
+            words.push((at, at + len));
+        }
+        at += len;
+    }
+    if forward {
+        if let Some((_, end)) = words.iter().find(|(_, end)| *end > offset) {
+            return (node, *end);
+        }
+    } else if let Some((start, _)) = words.iter().rev().find(|(start, _)| *start < offset) {
+        return (node, *start);
+    }
+    step_by_grapheme(host, (node, offset), forward)
+}
+
+/// The start or the end of the block that holds the position (an approximation of the line
+/// start/end: the whole block is treated as one line).
+fn block_edge(host: &Node, from: &Node, forward: bool) -> Option<TextPosition> {
+    let block = from
+        .inclusive_ancestors(ShadowIncluding::No)
+        .find(|ancestor| ancestor.is_block_node() || std::ptr::eq(&**ancestor, host))?;
+    let texts = text_nodes_of(&block);
+    if forward {
+        let last = texts.last()?.clone();
+        let len = utf16_len(&text_of(&last));
+        Some((last, len))
+    } else {
+        Some((texts.first()?.clone(), 0))
+    }
+}
+
+impl Document {
+    /// Move the caret of the document selection (or extend the selection) inside an editing
+    /// host, for the arrow, Home and End keys. Line motions (up and down) are not handled,
+    /// so they fall back to the default (scrolling).
+    fn move_document_caret(
+        &self,
+        cx: &mut JSContext,
+        direction: EditingDirection,
+        motion: EditingMotion,
+        modify: ModifySelection,
+    ) -> bool {
+        let forward = matches!(direction, EditingDirection::Forward);
+        if matches!(motion, EditingMotion::Line | EditingMotion::Page) {
+            return false;
+        }
+        let Some(selection) = self.GetSelection(cx) else {
+            return false;
+        };
+        let Some(focus_node) = selection.GetFocusNode(cx) else {
+            return false;
+        };
+        let Some(host) = focus_node.editing_host_of() else {
+            return false;
+        };
+        let focus_offset = selection.FocusOffset(cx);
+
+        // Moving without extending collapses a range to the edge it moves towards.
+        let by_unit = matches!(
+            motion,
+            EditingMotion::Character | EditingMotion::Grapheme | EditingMotion::Word
+        );
+        if matches!(modify, ModifySelection::No) && by_unit && !selection.IsCollapsed(cx) {
+            let Some(range) = selection.active_range(cx) else {
+                return false;
+            };
+            let (container, offset) = if forward {
+                (range.end_container(), range.end_offset())
+            } else {
+                (range.start_container(), range.start_offset())
+            };
+            let _ = selection.Collapse(cx, Some(&container), offset);
+            return true;
+        }
+
+        let Some(from) = text_position(&host, &focus_node, focus_offset) else {
+            return false;
+        };
+        let (node, offset) = match motion {
+            EditingMotion::Character | EditingMotion::Grapheme => {
+                step_by_grapheme(&host, from, forward)
+            },
+            EditingMotion::Word => step_by_word(&host, from, forward),
+            EditingMotion::LineStartOrEnd => {
+                match block_edge(&host, &from.0, forward) {
+                    Some(position) => position,
+                    None => return false,
+                }
+            },
+            EditingMotion::DocumentStartOrEnd => {
+                match block_edge(&host, &host, forward) {
+                    Some(position) => position,
+                    None => return false,
+                }
+            },
+            EditingMotion::Line | EditingMotion::Page => return false,
+        };
+        let _ = match modify {
+            ModifySelection::Yes => selection.Extend(cx, &node, offset),
+            ModifySelection::No => selection.Collapse(cx, Some(&node), offset),
+        };
+        true
+    }
 }

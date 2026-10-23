@@ -41,6 +41,7 @@ use crate::dom::staticrange::StaticRange;
 use crate::dom::traversal::FlatTreeForSelectionNoGcTraversal;
 use crate::dom::types::ShadowRoot;
 use crate::dom::{CharacterData, FlatTreeParent, NodeDamage, NodeFlags, StartOrEnd};
+use crate::dom::text::Text;
 
 /// Used value of [`user-select`](https://drafts.csswg.org/css-ui-4/#propdef-user-select):
 /// like the computed value but excludes `auto`.
@@ -1585,6 +1586,14 @@ struct FlatTreeSelection<'no_gc> {
 }
 
 impl<'no_gc> FlatTreeSelection<'no_gc> {
+    /// Whether this selection is collapsed (a caret) and is inside the given text node.
+    fn is_caret_in(&self, node: &Node) -> bool {
+        node.is::<Text>() &&
+            self.start.offset == self.end.offset &&
+            std::ptr::eq(&**self.start.container, node) &&
+            std::ptr::eq(&**self.end.container, node)
+    }
+
     /// Get the [`FlatTreeSelection`] for this [`Selection`], returning `None` if the [`Selection`]
     /// doesn't have a range or if that flat tree range is unrenderable (for instance, because one
     /// or both of the endpoints is not in the flat tree).
@@ -1771,10 +1780,24 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
         let inhibited = user_select == UsedUserSelect::None;
         node.set_flag(NodeFlags::SELECTION_INHIBITED, inhibited);
 
+        self.set_caret_flag(
+            node,
+            !inhibited && flat_tree_selection.is_caret_in(node) && node.is_editable(),
+        );
         self.set_node_selection(node, (!inhibited).then_some(flat_tree_selection));
     }
 
+    /// Update whether this text node paints the caret of the document selection. The caret is
+    /// decided when the text run is built, so a change has to rebuild the box of the text node.
+    fn set_caret_flag(&mut self, node: &Node, paints_caret: bool) {
+        if node.get_flag(NodeFlags::PAINTS_DOCUMENT_CARET) != paints_caret {
+            node.set_flag(NodeFlags::PAINTS_DOCUMENT_CARET, paints_caret);
+            node.dirty(self.no_gc, NodeDamage::ContentOrHeritage);
+        }
+    }
+
     fn clear(&mut self, node: &Node) {
+        self.set_caret_flag(node, false);
         node.set_flag(NodeFlags::OVERLAPS_DOCUMENT_SELECTION, false);
         node.set_flag(NodeFlags::SELECTION_INHIBITED, false);
         self.set_node_selection(node, None);

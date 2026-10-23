@@ -291,10 +291,10 @@ impl<'dom> LayoutDom<'dom, Node> {
             }
         }
         // This is the cases where, if `selection_for_text_node` returns a selection
-        // it is a document selection.
-        // For now, never paint a caret for document selection.
-        // This will change as we improve `contenteditable` support.
-        false
+        // it is a document selection. A caret is painted only for a collapsed selection
+        // inside an editing host (`contenteditable`); the flag is kept up to date by
+        // `VisibleSelectionFlagUpdate`.
+        self.unsafe_get().get_flag(NodeFlags::PAINTS_DOCUMENT_CARET)
     }
 
     pub(crate) fn replaced_is_selected(&self) -> bool {
