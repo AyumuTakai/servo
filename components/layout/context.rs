@@ -289,6 +289,11 @@ impl ImageResolver {
         }
     }
 
+    /// The previous rasterization of the `<svg>` element, kept for a short while after the element changed.
+    pub(crate) fn stale_rasterized_image(&self, svg_id: uuid::Uuid) -> Option<RasterImage> {
+        self.image_cache.stale_rasterized_image(&svg_id)
+    }
+
     pub(crate) fn queue_svg_element_for_serialization(&self, element: ServoLayoutNode<'_>) {
         self.pending_svg_elements_for_serialization
             .lock()

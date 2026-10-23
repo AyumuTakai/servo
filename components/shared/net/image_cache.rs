@@ -240,6 +240,10 @@ pub trait ImageCache: Sync + Send {
         callback: ImageCacheResponseCallback,
     );
 
+    /// The previous rasterization of the SVG element with the given id, if the element was invalidated only a moment
+    /// ago. Layout uses it to keep showing the old image until the new rasterization is ready, instead of drawing nothing.
+    fn stale_rasterized_image(&self, svg_id: &Uuid) -> Option<RasterImage>;
+
     /// Removes the rasterized image from the image_cache, identified by the id of the SVG
     fn evict_rasterized_image(&self, svg_id: &Uuid);
 

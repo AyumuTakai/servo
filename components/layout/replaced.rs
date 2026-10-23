@@ -159,6 +159,8 @@ pub(crate) enum ReplacedContentKind {
     SVGElement {
         vector_image: Option<VectorImage>,
         has_viewbox: bool,
+        /// The id of the `<svg>` element, used to keep showing its previous rasterization while a new one is prepared.
+        svg_id: uuid::Uuid,
     },
     Audio,
 }
@@ -331,6 +333,7 @@ impl ReplacedContents {
             ReplacedContentKind::SVGElement {
                 vector_image,
                 has_viewbox: svg_data.view_box.is_some(),
+                svg_id: svg_data.svg_id,
             },
             natural_size,
         )
@@ -619,9 +622,37 @@ impl ReplacedContents {
             ReplacedContentKind::SVGElement {
                 vector_image,
                 has_viewbox,
+                svg_id,
             } => {
+                let image_fragment = |base: BaseFragment, image_key| {
+                    Fragment::Image(Arc::new(ImageFragment {
+                        base,
+                        style: style.clone().into(),
+                        selected_style: self.selected_style.clone(),
+                        clip,
+                        image_key: Some(image_key),
+                        showing_broken_image_icon: false,
+                        url: None,
+                        natural_width: self.natural_size.width,
+                        natural_height: self.natural_size.height,
+                        selected: self.selected.clone(),
+                    }))
+                };
+                // The `<svg>` element was changed a moment ago and its new image is not ready yet (it is serialized,
+                // decoded and rasterized asynchronously): keep showing the previous image instead of drawing nothing,
+                // which made updated SVG content flicker.
+                let stale_image_key = || {
+                    layout_context
+                        .image_resolver
+                        .stale_rasterized_image(*svg_id)
+                        .and_then(|image| image.id)
+                };
+
                 let Some(vector_image) = vector_image else {
-                    return vec![];
+                    return stale_image_key()
+                        .map(|image_key| image_fragment(base, image_key))
+                        .into_iter()
+                        .collect();
                 };
 
                 if !has_viewbox {
@@ -659,20 +690,8 @@ impl ReplacedContents {
                         vector_image.svg_id,
                     )
                     .and_then(|image| image.id)
-                    .map(|image_key| {
-                        Fragment::Image(Arc::new(ImageFragment {
-                            base,
-                            style: style.clone().into(),
-                            selected_style: self.selected_style.clone(),
-                            clip,
-                            image_key: Some(image_key),
-                            showing_broken_image_icon: false,
-                            url: None,
-                            natural_width: self.natural_size.width,
-                            natural_height: self.natural_size.height,
-                            selected: self.selected.clone(),
-                        }))
-                    })
+                    .or_else(stale_image_key)
+                    .map(|image_key| image_fragment(base, image_key))
                     .into_iter()
                     .collect()
             },
