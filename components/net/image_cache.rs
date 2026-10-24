@@ -1151,15 +1151,14 @@ impl ImageCache for ImageCacheImpl {
             return Some(result);
         }
 
-        if let Some(svg_id) = svg_id &&
-            let Some(old_mapped_image_id) =
-                self.svg_id_image_id_map.lock().insert(svg_id, image_id) &&
+        let replaced = svg_id.and_then(|svg_id| {
+            let mut map = self.svg_id_image_id_map.lock();
+            map.insert(svg_id, image_id)
+                .map(|old| (old, map.values().any(|id| *id == old)))
+        });
+        if let Some((old_mapped_image_id, still_used)) = replaced &&
             old_mapped_image_id != image_id &&
-            !self
-                .svg_id_image_id_map
-                .lock()
-                .values()
-                .any(|id| *id == old_mapped_image_id)
+            !still_used
         {
             store.vector_images.remove(&old_mapped_image_id);
             store
@@ -1322,15 +1321,15 @@ impl ImageCache for ImageCacheImpl {
             entry.touched = now;
         }
         let mut store = self.store.lock();
-        if let Some(mapped_image_id) = self.svg_id_image_id_map.lock().remove(svg_id) {
-            // Several `<svg>` elements with the same content share one image: keep it while another element still uses it
-            // (a re-rendered document creates the new elements before the old ones are invalidated).
-            if self
-                .svg_id_image_id_map
-                .lock()
-                .values()
-                .any(|id| *id == mapped_image_id)
-            {
+        // Several `<svg>` elements with the same content share one image: keep it while another element still uses it
+        // (a re-rendered document creates the new elements before the old ones are invalidated).
+        let removed = {
+            let mut map = self.svg_id_image_id_map.lock();
+            map.remove(svg_id)
+                .map(|mapped_image_id| (mapped_image_id, map.values().any(|id| *id == mapped_image_id)))
+        };
+        if let Some((mapped_image_id, still_used)) = removed {
+            if still_used {
                 return;
             }
             store.pending_loads.remove(&mapped_image_id);
