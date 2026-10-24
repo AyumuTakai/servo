@@ -651,7 +651,7 @@ impl DocumentEventHandler {
                 .is_some_and(|new_target| {
                     self.current_hover_target
                         .get()
-                        .is_some_and(|old_target| *old_target == new_target)
+                        .is_some_and(|old_target| *old_target == *new_target)
                 });
             if same_target {
                 return;
