@@ -1367,7 +1367,7 @@ impl RangeMethods<crate::DomTypeHolder> for Range {
         // (The union must not start from a zero rectangle at the origin: that would always include (0, 0).)
         let bounding_rect = list
             .iter()
-            .filter(|rect| !rect.size.width.is_zero() && !rect.size.height.is_zero())
+            .filter(|rect| rect.size.width != Au::zero() && rect.size.height != Au::zero())
             .fold(None, |acc: Option<euclid::Rect<_, _>>, rect| {
                 Some(acc.map_or(*rect, |acc| acc.union(rect)))
             })
