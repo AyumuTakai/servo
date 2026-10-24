@@ -15,6 +15,7 @@ use js::rust::HandleObject;
 use script_bindings::cell::DomRefCell;
 use script_bindings::dom::{MutDom, UnrootedDom};
 use script_bindings::reflector::reflect_weak_referenceable_dom_object_with_proto;
+use servo_base::text::{RangeAny, Utf16CodeUnits};
 use smallvec::SmallVec;
 use style_traits::CSSPixel;
 
