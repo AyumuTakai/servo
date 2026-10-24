@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use atomic_refcell::AtomicRefCell;
 use base64::Engine as _;
 use cssparser::Parser;
@@ -30,9 +33,17 @@ use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{
-    ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, NodeTraits, UnbindContext,
+    BindContext, ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, NodeTraits, UnbindContext,
 };
 use crate::dom::svg::svggraphicselement::SVGGraphicsElement;
+
+thread_local! {
+    /// How many `<svg>` elements of a page use a serialized `data:` url. Elements with the same content share one
+    /// decoded and rasterized image, which must stay while any of them is in use: a document that is rendered again
+    /// creates the new elements before the old ones are removed, and removing the old ones must not throw away the image
+    /// the new ones show (it would be decoded and rasterized again, drawing nothing in between: icons flicker).
+    static SVG_URL_USERS: RefCell<HashMap<(String, ServoUrl), usize>> = RefCell::new(HashMap::new());
+}
 
 #[dom_struct]
 pub(crate) struct SVGSVGElement {
@@ -105,9 +116,47 @@ impl SVGSVGElement {
         let base64_encoded_source = base64::engine::general_purpose::STANDARD.encode(xml_source);
         let data_url = format!("data:image/svg+xml;base64,{base64_encoded_source}");
         match ServoUrl::parse(&data_url) {
-            Ok(url) => *self.cached_serialized_data_url.borrow_mut() = Some(Ok(url)),
+            Ok(url) => {
+                self.release_data_url();
+                self.use_data_url(&url);
+                *self.cached_serialized_data_url.borrow_mut() = Some(Ok(url));
+            },
             Err(error) => error!("Unable to parse serialized SVG data url: {error}"),
         };
+    }
+
+    fn url_users_key(&self, url: &ServoUrl) -> (String, ServoUrl) {
+        (
+            format!("{:?}", self.owner_window().pipeline_id()),
+            url.clone(),
+        )
+    }
+
+    fn use_data_url(&self, url: &ServoUrl) {
+        let key = self.url_users_key(url);
+        SVG_URL_USERS.with(|users| *users.borrow_mut().entry(key).or_insert(0) += 1);
+    }
+
+    /// Stop using the serialized url of this element. Returns the url when no other element of the page uses it.
+    fn release_data_url(&self) -> Option<ServoUrl> {
+        let Some(Ok(url)) = self.cached_serialized_data_url.borrow().clone() else {
+            return None;
+        };
+        let key = self.url_users_key(&url);
+        let last = SVG_URL_USERS.with(|users| {
+            let mut users = users.borrow_mut();
+            match users.get_mut(&key) {
+                Some(n) if *n > 1 => {
+                    *n -= 1;
+                    false
+                },
+                _ => {
+                    users.remove(&key);
+                    true
+                },
+            }
+        });
+        last.then_some(url)
     }
 
     fn process_use_elements(&self, cx: &mut JSContext, root_node: &Node) {
@@ -168,10 +217,11 @@ impl SVGSVGElement {
         owner_window
             .image_cache()
             .evict_rasterized_image(&self.uuid);
-        if let Some(Ok(url)) = &*self.cached_serialized_data_url.borrow() {
-            owner_window.layout_mut().remove_cached_image(url);
+        // Throw the image away only when no other element uses the same content.
+        if let Some(url) = self.release_data_url() {
+            owner_window.layout_mut().remove_cached_image(&url);
             owner_window.image_cache().evict_completed_image(
-                url,
+                &url,
                 owner_window.origin().immutable(),
                 &None,
             );
@@ -269,6 +319,18 @@ impl VirtualMethods for SVGSVGElement {
         }
 
         self.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
+    }
+
+    fn bind_to_tree(&self, cx: &mut JSContext, context: &BindContext) {
+        if let Some(s) = self.super_type() {
+            s.bind_to_tree(cx, context);
+        }
+
+        // Serialize right away (layout would ask script to do it, one layout later): when the same content was shown a
+        // moment ago, its image is still cached and is used by the first layout, and nothing is missing in between.
+        if context.tree_connected && self.cached_serialized_data_url.borrow().is_none() {
+            self.serialize_and_cache_subtree(cx);
+        }
     }
 
     fn unbind_from_tree(&self, cx: &mut js::context::JSContext, context: &UnbindContext<'_>) {

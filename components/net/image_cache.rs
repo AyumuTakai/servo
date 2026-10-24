@@ -1154,7 +1154,12 @@ impl ImageCache for ImageCacheImpl {
         if let Some(svg_id) = svg_id &&
             let Some(old_mapped_image_id) =
                 self.svg_id_image_id_map.lock().insert(svg_id, image_id) &&
-            old_mapped_image_id != image_id
+            old_mapped_image_id != image_id &&
+            !self
+                .svg_id_image_id_map
+                .lock()
+                .values()
+                .any(|id| *id == old_mapped_image_id)
         {
             store.vector_images.remove(&old_mapped_image_id);
             store
@@ -1318,6 +1323,16 @@ impl ImageCache for ImageCacheImpl {
         }
         let mut store = self.store.lock();
         if let Some(mapped_image_id) = self.svg_id_image_id_map.lock().remove(svg_id) {
+            // Several `<svg>` elements with the same content share one image: keep it while another element still uses it
+            // (a re-rendered document creates the new elements before the old ones are invalidated).
+            if self
+                .svg_id_image_id_map
+                .lock()
+                .values()
+                .any(|id| *id == mapped_image_id)
+            {
+                return;
+            }
             store.pending_loads.remove(&mapped_image_id);
             store.vector_images.remove(&mapped_image_id);
             let images_to_remove = store
