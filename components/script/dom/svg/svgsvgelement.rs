@@ -2,10 +2,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-
 use atomic_refcell::AtomicRefCell;
 use base64::Engine as _;
 use cssparser::Parser;
@@ -37,21 +33,6 @@ use crate::dom::node::{
     BindContext, ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, NodeTraits, UnbindContext,
 };
 use crate::dom::svg::svggraphicselement::SVGGraphicsElement;
-
-thread_local! {
-    /// How many `<svg>` elements of a page use a serialized `data:` url. Elements with the same content share one
-    /// decoded and rasterized image, which must stay while any of them is in use: a document that is rendered again
-    /// creates the new elements before the old ones are removed, and removing the old ones must not throw away the image
-    /// the new ones show (it would be decoded and rasterized again, drawing nothing in between: icons flicker).
-    static SVG_URL_USERS: RefCell<HashMap<(String, ServoUrl), usize>> = RefCell::new(HashMap::new());
-
-    /// Serialized urls that no element uses any more, and when that happened. Their images are thrown away a few
-    /// seconds later (`SVG_IMAGE_KEEP`), unless an element uses them again: a document that is rendered again removes its
-    /// old elements before it creates the new ones, which show the same images.
-    static SVG_URL_PENDING_EVICTIONS: RefCell<Vec<((String, ServoUrl), Instant)>> = RefCell::new(Vec::new());
-}
-
-const SVG_IMAGE_KEEP: Duration = Duration::from_secs(5);
 
 #[dom_struct]
 pub(crate) struct SVGSVGElement {
@@ -122,82 +103,17 @@ impl SVGSVGElement {
 
         let xml_source: String = xml_source.into();
         let base64_encoded_source = base64::engine::general_purpose::STANDARD.encode(xml_source);
-        let data_url = format!("data:image/svg+xml;base64,{base64_encoded_source}");
+        // The url is the key of the decoded image in the image cache. Every element gets its own (the fragment is ignored by the
+        // fetch), so that the lifetime of an image is the lifetime of its element: elements with the same content do not share
+        // an image that one of them could throw away while another still shows it.
+        let data_url = format!(
+            "data:image/svg+xml;base64,{base64_encoded_source}#{}",
+            self.uuid
+        );
         match ServoUrl::parse(&data_url) {
-            Ok(url) => {
-                self.release_data_url();
-                self.use_data_url(&url);
-                *self.cached_serialized_data_url.borrow_mut() = Some(Ok(url));
-                self.sweep_pending_evictions();
-            },
+            Ok(url) => *self.cached_serialized_data_url.borrow_mut() = Some(Ok(url)),
             Err(error) => error!("Unable to parse serialized SVG data url: {error}"),
         };
-    }
-
-    fn url_users_key(&self, url: &ServoUrl) -> (String, ServoUrl) {
-        (
-            format!("{:?}", self.owner_window().pipeline_id()),
-            url.clone(),
-        )
-    }
-
-    fn use_data_url(&self, url: &ServoUrl) {
-        let key = self.url_users_key(url);
-        SVG_URL_USERS.with(|users| *users.borrow_mut().entry(key).or_insert(0) += 1);
-    }
-
-    /// Stop using the serialized url of this element. Returns the url when no other element of the page uses it.
-    fn release_data_url(&self) -> Option<ServoUrl> {
-        let Some(Ok(url)) = self.cached_serialized_data_url.borrow().clone() else {
-            return None;
-        };
-        let key = self.url_users_key(&url);
-        let last = SVG_URL_USERS.with(|users| {
-            let mut users = users.borrow_mut();
-            match users.get_mut(&key) {
-                Some(n) if *n > 1 => {
-                    *n -= 1;
-                    false
-                },
-                _ => {
-                    users.remove(&key);
-                    true
-                },
-            }
-        });
-        last.then_some(url)
-    }
-
-    /// Evict the images of the serialized urls of this page that nobody has used for `SVG_IMAGE_KEEP`.
-    fn sweep_pending_evictions(&self) {
-        let pipeline = format!("{:?}", self.owner_window().pipeline_id());
-        let due: Vec<ServoUrl> = SVG_URL_PENDING_EVICTIONS.with(|pending| {
-            let mut due = Vec::new();
-            pending.borrow_mut().retain(|(key, at)| {
-                if key.0 != pipeline {
-                    return true;
-                }
-                let in_use = SVG_URL_USERS.with(|users| users.borrow().contains_key(key));
-                if in_use {
-                    return false;
-                }
-                if at.elapsed() >= SVG_IMAGE_KEEP {
-                    due.push(key.1.clone());
-                    return false;
-                }
-                true
-            });
-            due
-        });
-        let owner_window = self.owner_window();
-        for url in due {
-            owner_window.layout_mut().remove_cached_image(&url);
-            owner_window.image_cache().evict_completed_image(
-                &url,
-                owner_window.origin().immutable(),
-                &None,
-            );
-        }
     }
 
     fn process_use_elements(&self, cx: &mut JSContext, root_node: &Node) {
@@ -258,12 +174,14 @@ impl SVGSVGElement {
         owner_window
             .image_cache()
             .evict_rasterized_image(&self.uuid);
-        // Throw the image away only when no other element uses the same content, and not at once.
-        if let Some(url) = self.release_data_url() {
-            let key = self.url_users_key(&url);
-            SVG_URL_PENDING_EVICTIONS.with(|pending| pending.borrow_mut().push((key, Instant::now())));
+        if let Some(Ok(url)) = &*self.cached_serialized_data_url.borrow() {
+            owner_window.layout_mut().remove_cached_image(url);
+            owner_window.image_cache().evict_completed_image(
+                url,
+                owner_window.origin().immutable(),
+                &None,
+            );
         }
-        self.sweep_pending_evictions();
 
         *self.cached_serialized_data_url.borrow_mut() = None;
         self.upcast::<Node>().dirty(no_gc, NodeDamage::Other);
@@ -364,8 +282,8 @@ impl VirtualMethods for SVGSVGElement {
             s.bind_to_tree(cx, context);
         }
 
-        // Serialize right away (layout would ask script to do it, one layout later): when the same content was shown a
-        // moment ago, its image is still cached and is used by the first layout, and nothing is missing in between.
+        // Serialize right away (layout would ask script to do it, one layout later): the image is requested by the first
+        // layout.
         if context.tree_connected && self.cached_serialized_data_url.borrow().is_none() {
             self.serialize_and_cache_subtree(cx);
         }

@@ -45,11 +45,6 @@ use crate::image_cache::KeyCacheState::PipelineClosed;
 /// right away made WebRender draw nothing for the frames in between (a visible flicker of SVG content that is updated).
 const IMAGE_DELETE_DELAY: Duration = Duration::from_millis(400);
 
-/// How long the decoded image of an `<svg>` that no element uses any more is kept: a document that is rendered again
-/// removes its old elements before it creates the new ones with the same content, and they would draw nothing until
-/// the image is decoded and rasterized again.
-const SVG_IMAGE_KEEP: Duration = Duration::from_secs(5);
-
 struct DeferredDelete {
     due: Instant,
     paint_api: CrossProcessPaintApi,
@@ -922,7 +917,6 @@ impl ImageCacheFactory for ImageCacheFactoryImpl {
             })),
             svg_id_image_id_map: Arc::new(Mutex::new(FxHashMap::default())),
             last_rasterized: Arc::new(Mutex::new(FxHashMap::default())),
-            pending_evictions: Arc::new(Mutex::new(Vec::new())),
             broken_image_icon_data: self.broken_image_icon_data.clone(),
             thread_pool: self.thread_pool.clone(),
             usvg_options: Arc::new(opt),
@@ -948,8 +942,6 @@ pub struct ImageCacheImpl {
     /// The latest rasterization of each SVG element, kept for a short while after the element was invalidated, so that
     /// layout can keep showing it until the new rasterization is ready (see `stale_rasterized_image`).
     last_rasterized: Arc<Mutex<FxHashMap<Uuid, LastRasterized>>>,
-    /// Vector images no element maps to any more, and when that happened (see [`SVG_IMAGE_KEEP`]).
-    pending_evictions: Arc<Mutex<Vec<(PendingImageId, Instant)>>>,
     /// The data to use for the broken image icon used when images cannot load.
     broken_image_icon_data: Arc<Vec<u8>>,
     /// Thread pool for image decoding. This is shared with other [`ImageCache`]s in the
@@ -961,47 +953,6 @@ pub struct ImageCacheImpl {
     ///
     /// This is only used inside `usvg::Options` but is here so we can measure it.
     usvg_font_resolver: Arc<dyn FontResolver>,
-}
-
-impl ImageCacheImpl {
-    /// Drop the vector images that no `<svg>` element has used for [`SVG_IMAGE_KEEP`].
-    fn sweep_evictions(&self) {
-        let due = {
-            let mut pending = self.pending_evictions.lock();
-            let mut due = Vec::new();
-            pending.retain(|(id, at)| {
-                if at.elapsed() >= SVG_IMAGE_KEEP {
-                    due.push(*id);
-                    false
-                } else {
-                    true
-                }
-            });
-            due
-        };
-        if due.is_empty() {
-            return;
-        }
-        let mut store = self.store.lock();
-        let map = self.svg_id_image_id_map.lock();
-        for mapped_image_id in due {
-            // Used again in the meantime.
-            if map.values().any(|id| *id == mapped_image_id) {
-                continue;
-            }
-            store.pending_loads.remove(&mapped_image_id);
-            store.vector_images.remove(&mapped_image_id);
-            let images_to_remove = store
-                .rasterized_vector_images
-                .keys()
-                .filter(|(id, _size)| *id == mapped_image_id)
-                .cloned()
-                .collect::<Vec<_>>();
-            for (id, requested_size) in images_to_remove {
-                store.remove_rasterized_vector_image(&id, &requested_size);
-            }
-        }
-    }
 }
 
 impl ImageCache for ImageCacheImpl {
@@ -1200,14 +1151,10 @@ impl ImageCache for ImageCacheImpl {
             return Some(result);
         }
 
-        let replaced = svg_id.and_then(|svg_id| {
-            let mut map = self.svg_id_image_id_map.lock();
-            map.insert(svg_id, image_id)
-                .map(|old| (old, map.values().any(|id| *id == old)))
-        });
-        if let Some((old_mapped_image_id, still_used)) = replaced &&
-            old_mapped_image_id != image_id &&
-            !still_used
+        if let Some(svg_id) = svg_id &&
+            let Some(old_mapped_image_id) =
+                self.svg_id_image_id_map.lock().insert(svg_id, image_id) &&
+            old_mapped_image_id != image_id
         {
             store.vector_images.remove(&old_mapped_image_id);
             store
@@ -1369,20 +1316,20 @@ impl ImageCache for ImageCacheImpl {
             entry.evicted.get_or_insert(now);
             entry.touched = now;
         }
-        // Several `<svg>` elements with the same content share one image: keep it while another element still uses it
-        // (a re-rendered document creates the new elements before the old ones are invalidated), and for a while after the
-        // last one is gone.
-        let removed = {
-            let mut map = self.svg_id_image_id_map.lock();
-            map.remove(svg_id)
-                .map(|mapped_image_id| (mapped_image_id, map.values().any(|id| *id == mapped_image_id)))
-        };
-        if let Some((mapped_image_id, false)) = removed {
-            self.pending_evictions
-                .lock()
-                .push((mapped_image_id, Instant::now()));
+        let mut store = self.store.lock();
+        if let Some(mapped_image_id) = self.svg_id_image_id_map.lock().remove(svg_id) {
+            store.pending_loads.remove(&mapped_image_id);
+            store.vector_images.remove(&mapped_image_id);
+            let images_to_remove = store
+                .rasterized_vector_images
+                .keys()
+                .filter(|(id, _size)| *id == mapped_image_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            for (id, requested_size) in images_to_remove {
+                store.remove_rasterized_vector_image(&id, &requested_size);
+            }
         }
-        self.sweep_evictions();
     }
 
     /// Inform the image cache about a response for a pending request.
