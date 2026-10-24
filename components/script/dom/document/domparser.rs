@@ -17,6 +17,7 @@ use crate::dom::bindings::codegen::Bindings::WindowBinding::WindowMethods;
 use crate::dom::bindings::codegen::UnionTypes::TrustedHTMLOrString;
 use crate::dom::bindings::error::Fallible;
 use crate::dom::bindings::root::{Dom, DomRoot};
+use crate::dom::bindings::str::DOMString;
 use crate::dom::document::{Document, HasBrowsingContext, IsHTMLDocument};
 use crate::dom::servoparser::ServoParser;
 use crate::dom::trustedtypes::trustedhtml::TrustedHTML;
@@ -127,35 +128,56 @@ impl DOMParserMethods<crate::DomTypeHolder> for DOMParser {
             Text_xml | Application_xml | Application_xhtml_xml | Image_svg_xml => {
                 // Step 2. Let document be a new Document, whose content type is type
                 // and URL is this's relevant global object's associated Document's URL.
-                let document = Document::new(
-                    cx,
-                    &self.window,
-                    HasBrowsingContext::No,
-                    Some(url.clone()),
-                    None,
-                    doc.origin().clone(),
-                    IsHTMLDocument::NonHTMLDocument,
-                    Some(content_type),
-                    None,
-                    DocumentActivity::Inactive,
-                    loader,
-                    None,
-                    None,
-                    Default::default(),
-                    false,
-                    false,
-                    Some(doc.insecure_requests_policy()),
-                    doc.has_trustworthy_ancestor_or_current_origin(),
-                    doc.custom_element_reaction_stack(),
-                    doc.creation_sandboxing_flag_set(),
-                    doc.pipeline_id(),
-                    doc.image_cache(),
-                );
-                // Step switch-1. Create an XML parser parser, associated with document,
-                // and with XML scripting support disabled.
-                ServoParser::parse_xml_document(cx, &document, Some(compliant_string), url, None);
-                document.update_the_current_document_readiness(cx, DocumentReadyState::Complete);
-                document
+                let parse = |cx: &mut js::context::JSContext, source: DOMString| {
+                    let document = Document::new(
+                        cx,
+                        &self.window,
+                        HasBrowsingContext::No,
+                        Some(url.clone()),
+                        None,
+                        doc.origin().clone(),
+                        IsHTMLDocument::NonHTMLDocument,
+                        Some(content_type.clone()),
+                        None,
+                        DocumentActivity::Inactive,
+                        DocumentLoader::new(&doc.loader()),
+                        None,
+                        None,
+                        Default::default(),
+                        false,
+                        false,
+                        Some(doc.insecure_requests_policy()),
+                        doc.has_trustworthy_ancestor_or_current_origin(),
+                        doc.custom_element_reaction_stack(),
+                        doc.creation_sandboxing_flag_set(),
+                        doc.pipeline_id(),
+                        doc.image_cache(),
+                    );
+                    // Step switch-1. Create an XML parser parser, associated with document,
+                    // and with XML scripting support disabled.
+                    ServoParser::parse_xml_document(cx, &document, Some(source), url.clone(), None);
+                    document.update_the_current_document_readiness(cx, DocumentReadyState::Complete);
+                    document
+                };
+                let document = parse(cx, compliant_string.clone());
+                // Step switch-2. If that causes there to be a parse error, then return the result of
+                // creating a document that has a `parsererror` element (the way Firefox does).
+                let errors = document.take_xml_parse_errors();
+                if errors.is_empty() {
+                    document
+                } else {
+                    let message = format!("XML Parsing Error: {}", errors.join("; "));
+                    let escaped = message
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    parse(
+                        cx,
+                        DOMString::from(format!(
+                            "<parsererror xmlns=\"http://www.mozilla.org/newlayout/xml/parsererror.xml\">{escaped}</parsererror>"
+                        )),
+                    )
+                }
             },
         };
         // Step 4. Return document.
