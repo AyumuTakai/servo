@@ -32,6 +32,7 @@ use crate::dom::bindings::root::{Dom, DomRoot, LayoutDom, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::comparator::compare_dom_positions;
 use crate::dom::document::Document;
+use crate::dom::element::Element;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::iterators::{PrePostIteration, UnrootedFollowingFlatTreeNodesTraversal};
 use crate::dom::node::{Node, NodeTraits};
@@ -1588,7 +1589,9 @@ struct FlatTreeSelection<'no_gc> {
 impl<'no_gc> FlatTreeSelection<'no_gc> {
     /// Whether this selection is collapsed (a caret) and is inside the given text node.
     fn is_caret_in(&self, node: &Node) -> bool {
-        node.is::<Text>() &&
+        // A text node, or an empty element (an editing host with no text node), can hold the caret. Layout
+        // makes an empty text run for the caret on either of them.
+        (node.is::<Text>() || node.is::<Element>()) &&
             self.start.offset == self.end.offset &&
             std::ptr::eq(&**self.start.container, node) &&
             std::ptr::eq(&**self.end.container, node)
@@ -1759,6 +1762,16 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
             for node in traversal {
                 update.set(&node, flat_tree_selection);
             }
+            // The traversal may not reach the container of a caret in an empty text node or in an empty
+            // element, so flag it explicitly.
+            if flat_tree_selection.start.offset == flat_tree_selection.end.offset &&
+                std::ptr::eq(
+                    &**flat_tree_selection.start.container,
+                    &**flat_tree_selection.end.container,
+                )
+            {
+                update.set(&flat_tree_selection.start.container, flat_tree_selection);
+            }
         }
 
         update.finish(document);
@@ -1782,7 +1795,9 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
 
         self.set_caret_flag(
             node,
-            !inhibited && flat_tree_selection.is_caret_in(node) && node.is_editable(),
+            !inhibited &&
+                flat_tree_selection.is_caret_in(node) &&
+                (node.is_editable() || (node.is::<Element>() && node.is_editing_host())),
         );
         self.set_node_selection(node, (!inhibited).then_some(flat_tree_selection));
     }
