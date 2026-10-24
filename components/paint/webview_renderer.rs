@@ -132,6 +132,12 @@ pub(crate) struct WebViewRenderer {
     refresh_driver: Rc<BaseRefreshDriver>,
     /// The active webrender document.
     webrender_document: DocumentId,
+
+    /// While a mouse button is held down, the pipeline that received the mouse down. Mouse events keep
+    /// going to this pipeline even when the pointer moves over an iframe (the way other browsers
+    /// capture the mouse for a press that started in a document), so that a drag that started in the
+    /// page does not move on to the iframe's document.
+    mouse_capture_pipeline: Option<PipelineId>,
 }
 
 impl WebViewRenderer {
@@ -153,6 +159,7 @@ impl WebViewRenderer {
             rect,
             pipelines: Default::default(),
             touch_handler: TouchHandler::new(webview_id),
+            mouse_capture_pipeline: None,
             pending_scroll_zoom_events: Default::default(),
             pending_wheel_events: Default::default(),
             page_zoom: DEFAULT_PAGE_ZOOM,
@@ -427,7 +434,29 @@ impl WebViewRenderer {
                     InputEvent::Touch(_) => self.touch_handler.get_hit_test_result_cache_value(),
                     _ => None,
                 }
-                .or_else(|| self.hit_test(render_api, point).into_iter().nth(0));
+                .or_else(|| {
+                    let hits = self.hit_test(render_api, point);
+                    // A press that began in a document captures the mouse until the button is released.
+                    let captured = match event.event {
+                        InputEvent::MouseMove(_) | InputEvent::MouseButton(_) => {
+                            self.mouse_capture_pipeline
+                        },
+                        _ => None,
+                    }
+                    .and_then(|pipeline_id| hits.iter().find(|hit| hit.pipeline_id == pipeline_id));
+                    captured.or_else(|| hits.first()).cloned()
+                });
+                if let InputEvent::MouseButton(MouseButtonEvent { action, .. }) = &event.event {
+                    match action {
+                        MouseButtonAction::Down => {
+                            if self.mouse_capture_pipeline.is_none() {
+                                self.mouse_capture_pipeline =
+                                    hit_test_result.as_ref().map(|hit| hit.pipeline_id);
+                            }
+                        },
+                        MouseButtonAction::Up => self.mouse_capture_pipeline = None,
+                    }
+                }
                 if hit_test_result.is_none() {
                     warn!("Empty hit test result for input event, ignoring.");
                     return false;
