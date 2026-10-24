@@ -642,7 +642,20 @@ impl DocumentEventHandler {
             .most_recent_mousemove_point
             .replace(Some(hit_test_result.point_in_frame));
         if old_mouse_move_point == Some(hit_test_result.point_in_frame) {
-            return;
+            // The pointer did not move, but the page may have changed under it (an element that
+            // appeared there): only skip the event when the element under the pointer is the same.
+            let same_target = hit_test_result
+                .node
+                .inclusive_ancestors(ShadowIncluding::Yes)
+                .find_map(DomRoot::downcast::<Element>)
+                .is_some_and(|new_target| {
+                    self.current_hover_target
+                        .get()
+                        .is_some_and(|old_target| *old_target == new_target)
+                });
+            if same_target {
+                return;
+            }
         }
 
         // Update the cursor when the mouse moves, if it has changed.
