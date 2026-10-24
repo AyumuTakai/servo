@@ -542,10 +542,10 @@ impl DocumentEventHandler {
 
         // Without a related target (the pointer comes from outside of the page, or this is the first
         // move), every inclusive ancestor of the target is entered or left.
-        let common_ancestor = related_target.as_ref().map(|related_target| {
-            event_target
-                .common_ancestor_in_flat_tree(cx.no_gc(), related_target)
-                .unwrap_or_else(|| DomRoot::from_ref(event_target))
+        // The same goes for a related target that is not in the same tree any more (an element that
+        // was removed from the page, such as a menu that was closed): there is no common ancestor.
+        let common_ancestor = related_target.as_ref().and_then(|related_target| {
+            event_target.common_ancestor_in_flat_tree(cx.no_gc(), related_target)
         });
 
         // We need to create a target chain in case the event target shares
