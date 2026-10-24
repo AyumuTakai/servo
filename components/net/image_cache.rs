@@ -173,9 +173,12 @@ fn decode_bytes_sync(
         parse_svg_document_in_memory(bytes, usvg_options)
             .ok()
             .map(|svg_tree| {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(bytes, &mut hasher);
                 DecodedImage::Vector(VectorImageData {
                     svg_tree: Arc::new(svg_tree),
                     cors_status: cors,
+                    content_hash: std::hash::Hasher::finish(&hasher),
                 })
             })
     } else {
@@ -311,6 +314,8 @@ struct VectorImageData {
     #[conditional_malloc_size_of]
     svg_tree: Arc<usvg::Tree>,
     cors_status: CorsStatus,
+    /// A hash of the SVG source. Two elements with the same source and the same size are drawn the same.
+    content_hash: u64,
 }
 
 impl std::fmt::Debug for VectorImageData {
@@ -929,6 +934,9 @@ impl ImageCacheFactory for ImageCacheFactoryImpl {
 /// See [`ImageCacheImpl::last_rasterized`].
 struct LastRasterized {
     image: RasterImage,
+    /// The hash of the source of the SVG, and the size the image was drawn at (see [`VectorImageData::content_hash`]).
+    content_hash: u64,
+    size: DeviceIntSize,
     /// When the SVG element was invalidated (its rasterization evicted). `None` while the rasterization is current.
     evicted: Option<Instant>,
     /// When this was last requested or evicted. Entries nobody has touched for a long time are dropped.
@@ -957,6 +965,22 @@ pub struct ImageCacheImpl {
     ///
     /// This is only used inside `usvg::Options` but is here so we can measure it.
     usvg_font_resolver: Arc<dyn FontResolver>,
+}
+
+impl ImageCacheImpl {
+    /// The last image drawn at the place of the SVG element, if it was drawn from the same source at the same size.
+    fn reusable_raster(
+        &self,
+        svg_id: &Uuid,
+        vector_image: &VectorImageData,
+        requested_size: DeviceIntSize,
+    ) -> Option<RasterImage> {
+        let place = self.svg_places.lock().get(svg_id).copied()?;
+        let last = self.last_rasterized.lock();
+        let entry = last.get(&place)?;
+        (entry.content_hash == vector_image.content_hash && entry.size == requested_size)
+            .then(|| entry.image.clone())
+    }
 }
 
 impl ImageCache for ImageCacheImpl {
@@ -1148,6 +1172,8 @@ impl ImageCache for ImageCacheImpl {
                         place,
                         LastRasterized {
                             image: result.clone(),
+                            content_hash: vector_image.content_hash,
+                            size: requested_size,
                             evicted: None,
                             touched: now,
                         },
@@ -1157,6 +1183,8 @@ impl ImageCache for ImageCacheImpl {
                     svg_id,
                     LastRasterized {
                         image: result.clone(),
+                        content_hash: vector_image.content_hash,
+                        size: requested_size,
                         evicted: None,
                         touched: now,
                     },
@@ -1183,6 +1211,17 @@ impl ImageCache for ImageCacheImpl {
             .svg_rasterization_task_store
             .is_or_set_being_rasterized(image_id, requested_size)
         {
+            return None;
+        }
+
+        // A new element at the place of a removed one, with the same source and the same size: its image is the same.
+        // Draw nothing again: register the pixels of the removed element's image as the image of this element
+        // (an image of its own, with its own key and its own lifetime).
+        if let Some(svg_id) = svg_id &&
+            let Some(mut raster_image) = self.reusable_raster(&svg_id, &vector_image, requested_size)
+        {
+            raster_image.id = None;
+            store.load_image_with_keycache(PendingKey::Svg((image_id, raster_image, requested_size)));
             return None;
         }
 
