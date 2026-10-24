@@ -210,7 +210,11 @@ bitflags! {
         /// is inside an editing host (`contenteditable`). Layout paints a caret for it.
         const PAINTS_DOCUMENT_CARET = 1 << 3;
 
-        // There are two free bits here.
+        /// Whether the caret of a collapsed document selection is between the children of an element, and this
+        /// is the text node next to it: the caret is at the end of this text node (`CARET_AT_TEXT_END`) or at
+        /// its start (`CARET_AT_TEXT_START`). Layout paints the caret there (see `PAINTS_DOCUMENT_CARET`).
+        const CARET_AT_TEXT_END = 1 << 4;
+        const CARET_AT_TEXT_START = 1 << 5;
 
         /// Specifies whether the parser has set an associated form owner for
         /// this element. Only applicable for form-associatable elements.
