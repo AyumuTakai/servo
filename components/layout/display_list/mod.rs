@@ -1329,6 +1329,9 @@ impl Fragment {
         line_box_rect: &PhysicalRect<Au>,
     ) {
         let run_data = &fragment.run_data;
+        if fragment.is_empty_for_text_cursor {
+            eprintln!("[caret-dbg] display: empty cursor fragment, paint_caret={} sel={:?} range={:?}", run_data.paint_caret, *run_data.selection.borrow(), fragment.character_range_in_dom_node);
+        }
         let Some(selection) = *run_data.selection.borrow() else {
             return;
         };
