@@ -82,7 +82,7 @@ use servo_arc::Arc as ServoArc;
 use servo_base::cross_process_instant::CrossProcessInstant;
 use servo_base::generic_channel::{self, GenericCallback, GenericSender};
 use servo_base::id::{BrowsingContextId, PipelineId, WebViewId};
-use servo_base::text::Utf32CodeUnits;
+use servo_base::text::{RangeAny, Utf32CodeUnits};
 #[cfg(feature = "bluetooth")]
 use servo_bluetooth_traits::BluetoothRequest;
 #[cfg(feature = "webgl")]
@@ -3046,6 +3046,18 @@ impl Window {
         self.layout
             .borrow()
             .query_box_areas(node.to_trusted_node_address(), area)
+    }
+
+    /// The rectangles of a range of characters of a text node, one per line.
+    pub(crate) fn text_range_areas_query(
+        &self,
+        node: &Node,
+        range: RangeAny<Utf32CodeUnits>,
+    ) -> CSSPixelRectVec {
+        self.layout_reflow(QueryMsg::TextRangeAreas);
+        self.layout
+            .borrow()
+            .query_text_range_areas(node.to_trusted_node_address(), range)
     }
 
     pub(crate) fn client_rect_query(&self, node: &Node) -> Rect<i32, CSSPixel> {

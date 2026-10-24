@@ -367,6 +367,25 @@ impl Range {
         self.abstract_range().Collapsed()
     }
 
+    /// The rectangles of the characters of a text node that this range selects (the whole node when
+    /// the range does not end inside of it).
+    fn text_rects(&self, node: &Node) -> Vec<Rect<Au, CSSPixel>> {
+        let Some(character_data) = node.downcast::<CharacterData>() else {
+            return node.border_boxes();
+        };
+        let text = character_data.data();
+        let start = self.start_container();
+        let end = self.end_container();
+        let range = RangeAny::new(
+            std::ptr::eq(&*start, node)
+                .then(|| Utf16CodeUnits(self.start_offset()).to_utf32_code_units_in(&text)),
+            std::ptr::eq(&*end, node)
+                .then(|| Utf16CodeUnits(self.end_offset()).to_utf32_code_units_in(&text)),
+        );
+        drop(text);
+        node.owner_window().text_range_areas_query(node, range)
+    }
+
     /// <https://drafts.csswg.org/cssom-view/#dom-range-getclientrects>
     fn client_rects(&self, no_gc: &NoGC) -> Vec<Rect<Au, CSSPixel>> {
         // FIXME: For text nodes that are only partially selected, this should return the client
@@ -383,7 +402,7 @@ impl Range {
         // (including when the boundary points are identical).
         if self.collapsed() {
             if start.is::<CharacterData>() {
-                return start.border_boxes();
+                return self.text_rects(&start);
             } else {
                 return vec![];
             }
@@ -401,7 +420,7 @@ impl Range {
             );
             if is_text {
                 if self.IntersectsNode(no_gc, &node) {
-                    rects.extend(node.border_boxes());
+                    rects.extend(self.text_rects(&node));
                 }
             } else if matches!(node.type_id(), NodeTypeId::Element(_)) &&
                 self.contains(no_gc, &node) &&

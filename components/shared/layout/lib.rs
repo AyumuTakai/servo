@@ -378,6 +378,13 @@ pub trait Layout {
         exclude_transform_and_inline: bool,
     ) -> Option<Rect<Au, CSSPixel>>;
     fn query_box_areas(&self, node: TrustedNodeAddress, area: BoxAreaType) -> CSSPixelRectVec;
+    /// The rectangles of the text of a text node in the coordinate space of the document, one per
+    /// line. `range` limits them to a range of characters of the node (UTF-32 offsets in the DOM text).
+    fn query_text_range_areas(
+        &self,
+        node: TrustedNodeAddress,
+        range: RangeAny<Utf32CodeUnits>,
+    ) -> CSSPixelRectVec;
     fn query_client_rect(&self, node: TrustedNodeAddress) -> Rect<i32, CSSPixel>;
     fn query_current_css_zoom(&self, node: TrustedNodeAddress) -> f32;
     fn query_element_inner_outer_text(&self, node: TrustedNodeAddress) -> String;
@@ -553,6 +560,7 @@ pub enum ScrollContainerResponse {
 pub enum QueryMsg {
     BoxArea,
     BoxAreas,
+    TextRangeAreas,
     ClientRectQuery,
     CurrentCSSZoomQuery,
     EffectiveOverflow,

@@ -21,7 +21,7 @@ use layout_api::{
 use paint_api::display_list::ScrollTree;
 use script::layout_dom::ServoLayoutNode;
 use servo_arc::Arc as ServoArc;
-use servo_base::text::Utf32CodeUnits;
+use servo_base::text::{RangeAny, Utf32CodeUnits};
 use servo_geometry::{FastLayoutTransform, au_rect_to_f32_rect, f32_rect_to_au_rect};
 use servo_url::ServoUrl;
 use style::computed_values::display::T as Display;
@@ -160,6 +160,66 @@ pub(crate) fn process_box_areas_request(
     rects
         .filter_map(move |rect| transform_au_rectangle(rect, transform))
         .collect()
+}
+
+/// The border boxes of the text fragments of a text node, in the coordinate space of the document. Text
+/// fragments are not attached to the layout data of their DOM node, so they are found in the fragment tree
+/// by their tag. The scroll and transform of a text fragment are those of its nearest ancestor box fragment.
+pub(crate) fn process_text_box_areas_request(
+    fragment_tree: &FragmentTree,
+    stacking_context_tree: &StackingContextTree,
+    node: ServoLayoutNode<'_>,
+    range: RangeAny<Utf32CodeUnits>,
+) -> CSSPixelRectVec {
+    let target = node.opaque();
+    let scroll_tree = &stacking_context_tree.paint_info.scroll_tree;
+    let mut ancestors = Vec::new();
+    let mut rects = CSSPixelRectVec::new();
+    fragment_tree.find(|fragment, level, containing_block| {
+        while ancestors.last().is_some_and(|(l, _)| *l >= level) {
+            ancestors.pop();
+        }
+        match fragment {
+            Fragment::Text(text)
+                if text.base.tag.is_some_and(|tag| {
+                    tag.node == target && tag.pseudo_element_chain.is_empty()
+                }) =>
+            {
+                let mut rect = text
+                    .base
+                    .rect()
+                    .translate(containing_block.origin.to_vector());
+                // Limit the rectangle to the characters of the range that are in this fragment.
+                let characters = text.run_data.map_dom_range_to_transformed_range(range);
+                if text.character_range_in_dom_node.start > characters.end ||
+                    text.character_range_in_dom_node.end < characters.start
+                {
+                    return None;
+                }
+                let (start_x, end_x) = text.advances_of_character_range(&characters);
+                rect.origin.x += start_x;
+                rect.size.width = end_x - start_x;
+                let transform = ancestors
+                    .iter()
+                    .rev()
+                    .find_map(|(_, spatial_node)| *spatial_node)
+                    .map(|spatial_node| {
+                        scroll_tree.cumulative_node_to_root_transform(spatial_node)
+                    });
+                match transform {
+                    Some(transform) => rects.extend(transform_au_rectangle(rect, transform)),
+                    None => rects.push(rect),
+                }
+            },
+            _ => {
+                if let Some(box_fragment) = fragment.retrieve_box_fragment() {
+                    ancestors.push((level, box_fragment.spatial_tree_node()));
+                }
+            },
+        }
+        None::<()>
+    });
+    rects
 }
 
 pub fn process_client_rect_request(node: ServoLayoutNode<'_>) -> Rect<i32, CSSPixel> {
