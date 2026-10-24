@@ -1364,9 +1364,15 @@ impl RangeMethods<crate::DomTypeHolder> for Range {
         // Step 3. If all rectangles in list have zero width or height, return the first rectangle in list.
         // Step 4. Otherwise, return a DOMRect object describing the smallest rectangle that includes all
         // of the rectangles in list of which the height or width is not zero.
+        // (The union must not start from a zero rectangle at the origin: that would always include (0, 0).)
         let bounding_rect = list
-            .into_iter()
-            .fold(euclid::Rect::zero(), |acc, rect| acc.union(&rect));
+            .iter()
+            .filter(|rect| !rect.size.width.is_zero() && !rect.size.height.is_zero())
+            .fold(None, |acc: Option<euclid::Rect<_, _>>, rect| {
+                Some(acc.map_or(*rect, |acc| acc.union(rect)))
+            })
+            .or_else(|| list.first().copied())
+            .unwrap_or_else(euclid::Rect::zero);
 
         DOMRect::new(
             cx,
