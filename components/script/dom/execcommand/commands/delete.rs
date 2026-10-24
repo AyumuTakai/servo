@@ -98,6 +98,12 @@ pub(crate) fn execute_delete_command(
                     child.remove_preserving_its_descendants(cx);
                     return true;
                 }
+                // Not in the specification (browsers do this): a child that is an element that is not editable (such as
+                // an element with `contenteditable="false"`) is deleted as one unit, instead of looking inside of it.
+                if child.is::<Element>() && !child.is_editable() && child.is_inline_node() {
+                    child.remove_self(cx);
+                    return true;
+                }
                 // Step 4.5. Otherwise, if node has a child with index offset − 1 and that child is not a block node or a br or an img,
                 // set node to that child, then set offset to the length of node.
                 if !(child.is_block_node() ||
