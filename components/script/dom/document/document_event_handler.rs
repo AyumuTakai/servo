@@ -540,18 +540,23 @@ impl DocumentEventHandler {
             FireMouseEventType::Enter | FireMouseEventType::Leave
         ));
 
-        let common_ancestor = match related_target.as_ref() {
-            Some(related_target) => event_target
+        // Without a related target (the pointer comes from outside of the page, or this is the first
+        // move), every inclusive ancestor of the target is entered or left.
+        let common_ancestor = related_target.as_ref().map(|related_target| {
+            event_target
                 .common_ancestor_in_flat_tree(cx.no_gc(), related_target)
-                .unwrap_or_else(|| DomRoot::from_ref(event_target)),
-            None => DomRoot::from_ref(event_target),
-        };
+                .unwrap_or_else(|| DomRoot::from_ref(event_target))
+        });
 
         // We need to create a target chain in case the event target shares
         // its boundaries with its ancestors.
         let mut targets: Vec<_> = event_target
             .inclusive_ancestors_in_flat_tree_unrooted(cx.no_gc())
-            .take_while(|node| *node != *common_ancestor)
+            .take_while(|node| {
+                common_ancestor
+                    .as_ref()
+                    .is_none_or(|common_ancestor| *node != **common_ancestor)
+            })
             .map(|node| node.as_rooted())
             .collect();
 
