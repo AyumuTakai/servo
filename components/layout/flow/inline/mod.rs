@@ -1703,7 +1703,6 @@ impl InlineFormattingContextLayout<'_> {
         let Some(caret_placeholder) = self.current_line.caret_placeholder.take() else {
             return;
         };
-        eprintln!("[caret-dbg] possibly_push: have placeholder; items={}", self.current_line.line_items.len());
 
         // If the last content line item is a text item, then the placeholder for the text caret is not necessary.
         if self
@@ -1719,10 +1718,8 @@ impl InlineFormattingContextLayout<'_> {
 
         let inline_container_state = self.current_inline_container_state();
         let Some(font) = inline_container_state.default_font.clone() else {
-            eprintln!("[caret-dbg] possibly_push: no default font");
             return;
         };
-        eprintln!("[caret-dbg] possibly_push: pushing empty text run");
 
         self.push_line_item_to_unbreakable_segment(LineItem::TextRun(
             self.current_inline_box_identifier(),
