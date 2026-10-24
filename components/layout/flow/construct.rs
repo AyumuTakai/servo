@@ -286,16 +286,6 @@ impl<'dom, 'style> BlockContainerBuilder<'dom, 'style> {
     pub(crate) fn finish(mut self) -> BlockContainer {
         debug_assert!(!self.currently_processing_inline_box());
 
-        // An empty editing host that holds the caret has no text to paint it on.
-        if self.inline_formatting_context_builder.is_none() &&
-            self.block_level_boxes.is_empty() &&
-            self.info.node.text_node_paints_caret()
-        {
-            let info = self.info;
-            self.ensure_inline_formatting_context_builder()
-                .push_empty_text_run_for_caret(info);
-        }
-
         self.finish_anonymous_table_if_needed();
 
         if let Some(inline_formatting_context) = self.finish_ongoing_inline_formatting_context() {
@@ -471,6 +461,13 @@ impl<'dom> TraversalHandler<'dom> for BlockContainerBuilder<'dom, '_> {
             .as_mut()
             .expect("Should be guaranteed by line above")
             .push_text_with_possible_first_letter(text, info, self.info, self.context);
+    }
+
+    fn handle_caret(&mut self, info: &NodeAndStyleInfo<'dom>) {
+        // The caret between the children of an editing host: an empty text run to paint it on.
+        self.finish_anonymous_table_if_needed();
+        self.ensure_inline_formatting_context_builder()
+            .push_empty_text_run_for_caret(info);
     }
 
     fn enter_display_contents(&mut self, styles: SharedInlineStyles) {

@@ -267,18 +267,6 @@ impl<'dom> LayoutDom<'dom, Node> {
 
         let text_node = self.downcast::<Text>()?;
         let text = text_node.upcast().data_for_layout();
-        // The caret is between the children of the element, next to this text node: it is at the
-        // end or at the start of the text (`VisibleSelectionFlagUpdate`).
-        if unsafe_self.get_flag(NodeFlags::CARET_AT_TEXT_END) {
-            let end = Utf32CodeUnits(text.chars().count() as u32);
-            return Some(RangeAny::new(Some(end), Some(end)));
-        }
-        if unsafe_self.get_flag(NodeFlags::CARET_AT_TEXT_START) {
-            return Some(RangeAny::new(
-                Some(Utf32CodeUnits(0)),
-                Some(Utf32CodeUnits(0)),
-            ));
-        }
         let selection = self.owner_doc_for_layout().visible_selection_for_layout()?;
         let range = selection.range_for_layout();
 
@@ -291,6 +279,25 @@ impl<'dom> LayoutDom<'dom, Node> {
         let end =
             is_end_node.then(|| Utf16CodeUnits(range.end.offset).to_utf32_code_units_in(&text));
         Some(RangeAny::new(start, end))
+    }
+
+    /// For an element that holds the caret of a collapsed document selection between its children
+    /// (such as an editing host whose caret is before, between or after inline boxes): the number of
+    /// children before the caret. Layout puts an empty text run there, to paint the caret on.
+    pub(crate) fn caret_child_offset(&self) -> Option<usize> {
+        let unsafe_self = self.unsafe_get();
+        if !unsafe_self.get_flag(NodeFlags::PAINTS_DOCUMENT_CARET) ||
+            self.downcast::<Element>().is_none()
+        {
+            return None;
+        }
+        let selection = self.owner_doc_for_layout().visible_selection_for_layout()?;
+        let range = selection.range_for_layout();
+        let range = range.as_ref()?;
+        let is_start_node = unsafe { range.start.container.to_layout() } == *self;
+        let is_end_node = unsafe { range.end.container.to_layout() } == *self;
+        (is_start_node && is_end_node && range.start.offset == range.end.offset)
+            .then_some(range.start.offset as usize)
     }
 
     pub(crate) fn text_node_paints_caret(&self) -> bool {

@@ -1772,20 +1772,10 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
             {
                 let container = &flat_tree_selection.start.container;
                 update.set(container, flat_tree_selection);
-                // A caret between the children of an element (after an inline box that is not text, for
-                // example): paint it at the end of the text node before it, or at the start of the one after it.
+                // A caret between the children of an element has no text to be painted on: layout puts an empty text
+                // run at that place, so the element is laid out again when the caret moves.
                 if container.is::<Element>() && container.is_editable_or_editing_host() {
-                    let offset = flat_tree_selection.start.offset as usize;
-                    let mut children = container.children_unrooted(no_gc);
-                    let before = offset
-                        .checked_sub(1)
-                        .and_then(|i| container.children_unrooted(no_gc).nth(i))
-                        .filter(|child| child.is::<Text>());
-                    if let Some(text) = before {
-                        update.set_adjacent_caret(&text, true);
-                    } else if let Some(text) = children.nth(offset).filter(|c| c.is::<Text>()) {
-                        update.set_adjacent_caret(&text, false);
-                    }
+                    container.dirty(no_gc, NodeDamage::ContentOrHeritage);
                 }
             }
         }
@@ -1827,26 +1817,7 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
         }
     }
 
-    /// Flag a text node next to a caret that is between the children of an element.
-    fn set_adjacent_caret(&mut self, text: &UnrootedDom<'no_gc, Node>, at_end: bool) {
-        if !text.get_flag(NodeFlags::OVERLAPS_DOCUMENT_SELECTION) {
-            text.set_flag(NodeFlags::OVERLAPS_DOCUMENT_SELECTION, true);
-        } else {
-            self.previously_flagged_nodes.remove(text);
-        }
-        let changed = text.get_flag(NodeFlags::CARET_AT_TEXT_END) != at_end ||
-            text.get_flag(NodeFlags::CARET_AT_TEXT_START) == at_end;
-        text.set_flag(NodeFlags::CARET_AT_TEXT_END, at_end);
-        text.set_flag(NodeFlags::CARET_AT_TEXT_START, !at_end);
-        self.set_caret_flag(text, true);
-        if changed {
-            text.dirty(self.no_gc, NodeDamage::ContentOrHeritage);
-        }
-    }
-
     fn clear(&mut self, node: &Node) {
-        node.set_flag(NodeFlags::CARET_AT_TEXT_END, false);
-        node.set_flag(NodeFlags::CARET_AT_TEXT_START, false);
         self.set_caret_flag(node, false);
         node.set_flag(NodeFlags::OVERLAPS_DOCUMENT_SELECTION, false);
         node.set_flag(NodeFlags::SELECTION_INHIBITED, false);

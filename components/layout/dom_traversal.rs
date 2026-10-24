@@ -126,6 +126,10 @@ impl Deref for BoxTreeString<'_> {
 pub(super) trait TraversalHandler<'dom> {
     fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: BoxTreeString<'dom>);
 
+    /// The caret of the document selection is here, between two children (or before the first or after
+    /// the last) of the element `info`.
+    fn handle_caret(&mut self, _info: &NodeAndStyleInfo<'dom>) {}
+
     /// Or pseudo-element
     fn handle_element(
         &mut self,
@@ -156,13 +160,24 @@ fn traverse_children_of<'dom>(
         traverse_eager_pseudo_element(PseudoElement::Before, parent_element_info, context, handler);
     }
 
+    // The caret between the children of an editing host needs a place to be painted on.
+    let caret_offset = parent_element_info.node.caret_child_offset();
+    let mut child_index = 0;
     for child in parent_element_info.node.flat_tree_children() {
+        if caret_offset == Some(child_index) {
+            handler.handle_caret(parent_element_info);
+        }
+        child_index += 1;
         if child.is_text_node() {
             let info = NodeAndStyleInfo::new(child, child.style(&context.style_context));
             handler.handle_text(&info, child.text_content().into());
         } else if child.is_element() {
             traverse_element(child, context, handler);
         }
+    }
+
+    if caret_offset.is_some_and(|offset| offset >= child_index) {
+        handler.handle_caret(parent_element_info);
     }
 
     if is_element {
