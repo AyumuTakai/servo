@@ -1805,6 +1805,9 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
     /// Update whether this text node paints the caret of the document selection. The caret is
     /// decided when the text run is built, so a change has to rebuild the box of the text node.
     fn set_caret_flag(&mut self, node: &Node, paints_caret: bool) {
+        if paints_caret {
+            eprintln!("[caret-dbg] flag set on {:?}", node.type_id());
+        }
         if node.get_flag(NodeFlags::PAINTS_DOCUMENT_CARET) != paints_caret {
             node.set_flag(NodeFlags::PAINTS_DOCUMENT_CARET, paints_caret);
             node.dirty(self.no_gc, NodeDamage::ContentOrHeritage);

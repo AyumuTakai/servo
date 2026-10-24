@@ -648,6 +648,7 @@ impl TextRun {
         if self.text_range.is_empty() {
             // An empty text node, or an empty editing host, that holds the caret of the document
             // selection: ask for an empty fragment on the line, so that the caret is painted.
+            eprintln!("[caret-dbg] empty run paint_caret={}", self.run_data.paint_caret);
             if self.run_data.paint_caret {
                 ifc.current_line.caret_placeholder = Some(CaretPlaceholder {
                     run_data: self.run_data.clone(),

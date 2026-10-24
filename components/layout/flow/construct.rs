@@ -286,6 +286,7 @@ impl<'dom, 'style> BlockContainerBuilder<'dom, 'style> {
     pub(crate) fn finish(mut self) -> BlockContainer {
         debug_assert!(!self.currently_processing_inline_box());
 
+        eprintln!("[caret-dbg] finish ifc_none={} blocks_empty={} paints={}", self.inline_formatting_context_builder.is_none(), self.block_level_boxes.is_empty(), self.info.node.text_node_paints_caret());
         // An empty editing host that holds the caret has no text to paint it on.
         if self.inline_formatting_context_builder.is_none() &&
             self.block_level_boxes.is_empty() &&
@@ -448,6 +449,7 @@ impl<'dom> TraversalHandler<'dom> for BlockContainerBuilder<'dom, '_> {
     fn handle_text(&mut self, info: &NodeAndStyleInfo<'dom>, text: BoxTreeString<'dom>) {
         if text.is_empty() {
             // An empty text node that holds the caret still needs a place to paint it.
+            eprintln!("[caret-dbg] empty text, paints={}", info.node.text_node_paints_caret());
             if info.node.text_node_paints_caret() {
                 self.ensure_inline_formatting_context_builder()
                     .push_empty_text_run_for_caret(info);
