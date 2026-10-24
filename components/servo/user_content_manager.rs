@@ -4,7 +4,9 @@
 
 use std::rc::Rc;
 
-use embedder_traits::user_contents::{UserContentManagerId, UserScript, UserStyleSheet};
+use embedder_traits::user_contents::{
+    HostChannel, UserContentManagerId, UserScript, UserStyleSheet,
+};
 use servo_constellation_traits::{EmbedderToConstellationMessage, UserContentManagerAction};
 
 use crate::Servo;
@@ -63,6 +65,18 @@ impl UserContentManager {
             EmbedderToConstellationMessage::UserContentManagerAction(
                 self.id,
                 UserContentManagerAction::RemoveUserStyleSheet(user_stylesheet.id()),
+            ),
+        );
+    }
+
+    /// Give the documents that `host_channel` names `navigator.hostChannel.postMessage(message)`,
+    /// which reaches `WebViewDelegate::notify_host_channel_message`. `None` removes the channel.
+    /// Like the other user contents, this takes effect for documents loaded afterwards.
+    pub fn set_host_channel(&self, host_channel: Option<HostChannel>) {
+        self.servo.constellation_proxy().send(
+            EmbedderToConstellationMessage::UserContentManagerAction(
+                self.id,
+                UserContentManagerAction::SetHostChannel(host_channel),
             ),
         );
     }

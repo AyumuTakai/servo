@@ -57,6 +57,7 @@ use crate::dom::performance::performanceresourcetiming::InitiatorType;
 use crate::dom::permissions::Permissions;
 use crate::dom::pluginarray::PluginArray;
 use crate::dom::serviceworkercontainer::ServiceWorkerContainer;
+use crate::dom::hostchannel::HostChannel;
 use crate::dom::servointernals::ServoInternals;
 use crate::dom::storagemanager::StorageManager;
 use crate::dom::types::UserActivation;
@@ -139,6 +140,7 @@ pub(crate) struct Navigator {
     #[cfg(feature = "gamepad")]
     has_gamepad_gesture: Cell<bool>,
     servo_internals: MutNullableDom<ServoInternals>,
+    host_channel: MutNullableDom<HostChannel>,
     user_activation: MutNullableDom<UserActivation>,
     wake_lock: MutNullableDom<WakeLock>,
 }
@@ -167,6 +169,7 @@ impl Navigator {
             #[cfg(feature = "gamepad")]
             has_gamepad_gesture: Cell::new(false),
             servo_internals: Default::default(),
+            host_channel: Default::default(),
             user_activation: Default::default(),
             wake_lock: Default::default(),
         }
@@ -618,6 +621,12 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
     fn Servo(&self, cx: &mut js::context::JSContext) -> DomRoot<ServoInternals> {
         self.servo_internals
             .or_init(|| ServoInternals::new(cx, &self.global()))
+    }
+
+    /// `navigator.hostChannel` (not a web standard. `UserContentManager::set_host_channel`)
+    fn HostChannel(&self, cx: &mut js::context::JSContext) -> DomRoot<HostChannel> {
+        self.host_channel
+            .or_init(|| HostChannel::new(cx, &self.global()))
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-navigator-registerprotocolhandler>

@@ -284,6 +284,7 @@ impl<'dom> LayoutDom<'dom, Node> {
     /// For an element that holds the caret of a collapsed document selection between its children
     /// (such as an editing host whose caret is before, between or after inline boxes): the number of
     /// children before the caret. Layout puts an empty text run there, to paint the caret on.
+    #[expect(unsafe_code)]
     pub(crate) fn caret_child_offset(&self) -> Option<usize> {
         let unsafe_self = self.unsafe_get();
         if !unsafe_self.get_flag(NodeFlags::PAINTS_DOCUMENT_CARET) ||

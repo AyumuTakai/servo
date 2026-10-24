@@ -42,7 +42,9 @@ use devtools_traits::{
     CSSError, DevtoolScriptControlMsg, DevtoolsPageInfo, NavigationState,
     ScriptToDevtoolsControlMsg, WorkerId,
 };
-use embedder_traits::user_contents::{UserContentManagerId, UserContents, UserScript};
+use embedder_traits::user_contents::{
+    HostChannel, UserContentManagerId, UserContents, UserScript,
+};
 use embedder_traits::{
     EmbedderControlId, EmbedderControlResponse, EmbedderMsg, FocusSequenceNumber,
     InputEventOutcome, JavaScriptEvaluationError, JavaScriptEvaluationId, MediaSessionActionType,
@@ -218,6 +220,7 @@ impl Drop for ScriptUserInteractingGuard {
 struct ScriptThreadUserContents {
     user_scripts: Rc<Vec<UserScript>>,
     user_stylesheets: Rc<Vec<DocumentStyleSheet>>,
+    host_channel: Option<HostChannel>,
 }
 
 impl ScriptThreadUserContents {
@@ -242,6 +245,7 @@ impl ScriptThreadUserContents {
         Self {
             user_scripts: Rc::new(user_contents.scripts),
             user_stylesheets: Rc::new(user_stylesheets),
+            host_channel: user_contents.host_channel,
         }
     }
 }
@@ -3456,7 +3460,7 @@ impl ScriptThread {
             font_resolver,
         );
 
-        let (user_contents, user_stylesheets) = incomplete
+        let (user_contents, user_stylesheets, host_channel) = incomplete
             .user_content_manager_id
             .and_then(|user_content_manager_id| {
                 self.user_contents_for_manager_id
@@ -3466,6 +3470,7 @@ impl ScriptThread {
                         (
                             script_thread_user_contents.user_scripts.clone(),
                             script_thread_user_contents.user_stylesheets.clone(),
+                            script_thread_user_contents.host_channel.clone(),
                         )
                     })
             })
@@ -3546,6 +3551,7 @@ impl ScriptThread {
                     self.unminify_css,
                     self.local_script_source.clone(),
                     user_contents,
+                    host_channel,
                     self.player_context.clone(),
                     #[cfg(feature = "webgpu")]
                     self.gpu_id_hub.clone(),

@@ -1544,6 +1544,14 @@ where
                     },
                 );
             },
+            UserContentManagerAction::SetHostChannel(host_channel) => {
+                self.mutate_user_contents_for_manager_id_and_notify_script_threads(
+                    user_content_manager_id,
+                    |user_contents| {
+                        user_contents.host_channel = host_channel;
+                    },
+                );
+            },
             UserContentManagerAction::DestroyUserContentManager => {
                 self.user_contents_for_manager_id
                     .remove(&user_content_manager_id);

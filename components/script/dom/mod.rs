@@ -271,6 +271,7 @@ pub(crate) mod geometry;
 pub(crate) use self::geometry::*;
 pub(crate) mod globalscope;
 pub(crate) use self::globalscope::*;
+pub(crate) mod hostchannel;
 pub(crate) mod html;
 pub(crate) use self::html::*;
 pub(crate) mod indexeddb;

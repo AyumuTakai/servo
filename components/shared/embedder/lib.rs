@@ -564,6 +564,8 @@ pub enum EmbedderMsg {
     /// Let the embedder process a DOM Console API message.
     /// <https://developer.mozilla.org/en-US/docs/Web/API/Console_API>
     ShowConsoleApiMessage(Option<WebViewId>, ConsoleLogLevel, String),
+    /// A message that a document sent with `navigator.hostChannel.postMessage`.
+    HostChannelMessage(WebViewId, user_contents::HostChannelSender, String),
     /// Request to the embedder to display a user interace control.
     ShowEmbedderControl(EmbedderControlId, DeviceIntRect, EmbedderControlRequest),
     /// Request to the embedder to hide a user interface control.
@@ -718,9 +720,15 @@ pub struct WebResourceRequest {
     pub is_redirect: bool,
     /// The request body, read in full. Only filled for requests to the host named by the
     /// `network_intercept_body_host` preference (an embedder that serves that host itself, e.g.
-    /// from an in-process server, needs POST/PUT bodies); `None` otherwise.
+    /// from an in-process server, needs POST/PUT bodies) that come from a document of that same
+    /// origin; `None` otherwise.
     #[serde(default)]
     pub body: Option<Vec<u8>>,
+    /// The origin of the document (or worker) that made the request (its ASCII serialization;
+    /// `null` for an opaque origin, such as a sandboxed iframe or a `data:` URL). `None` when the
+    /// request has no such origin (for example, a navigation that the embedder started).
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

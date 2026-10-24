@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use embedder_traits::user_contents::HostChannelSender;
 use embedder_traits::{
     AlertResponse, AllowOrDeny, DownloadEvent, AuthenticationResponse, BluetoothDeviceDescription,
     ConfirmResponse, ConsoleLogLevel, ContextMenuAction, ContextMenuElementInformation,
@@ -1077,6 +1078,17 @@ pub trait WebViewDelegate {
     /// <https://developer.mozilla.org/en-US/docs/Web/API/Console_API>
     fn show_console_message(&self, _webview: WebView, _level: ConsoleLogLevel, _message: String) {}
 
+    /// A document in this [`WebView`] sent a message with `navigator.hostChannel.postMessage`
+    /// (only documents that `UserContentManager::set_host_channel` names have it). `sender`
+    /// describes the document.
+    fn notify_host_channel_message(
+        &self,
+        _webview: WebView,
+        _sender: HostChannelSender,
+        _message: String,
+    ) {
+    }
+
     /// There is a new accessibility tree update from this [`WebView`].
     ///
     /// Generally the impl should send this update to an AccessKit adapter, but it may need to queue
@@ -1226,6 +1238,7 @@ mod test {
             is_for_main_frame: false,
             is_redirect: false,
             body: None,
+            origin: None,
         };
         let web_resource_response = || {
             WebResourceResponse::new(

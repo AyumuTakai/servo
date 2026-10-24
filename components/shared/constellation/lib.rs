@@ -16,7 +16,7 @@ use std::fmt;
 
 use accesskit::ActionRequest;
 use embedder_traits::user_contents::{
-    UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
+    HostChannel, UserContentManagerId, UserScript, UserScriptId, UserStyleSheet, UserStyleSheetId,
 };
 use embedder_traits::{
     EmbedderControlId, EmbedderControlResponse, InputEventAndId, JavaScriptEvaluationId,
@@ -128,6 +128,7 @@ pub enum UserContentManagerAction {
     RemoveUserScript(UserScriptId),
     AddUserStyleSheet(UserStyleSheet),
     RemoveUserStyleSheet(UserStyleSheetId),
+    SetHostChannel(Option<HostChannel>),
 }
 
 /// A description of a paint metric that is sent from the Servo renderer to the
