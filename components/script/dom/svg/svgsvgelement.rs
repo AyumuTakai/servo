@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use atomic_refcell::AtomicRefCell;
 use base64::Engine as _;
 use cssparser::Parser;
@@ -75,7 +78,24 @@ impl SVGSVGElement {
         )
     }
 
+    /// A key made from the position of this element in the document (the tag and the index among the siblings of each
+    /// ancestor). When a page renders a part again, the new element at the same position shows the image of the removed one
+    /// until its own image is ready.
+    fn place(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for node in self.upcast::<Node>().inclusive_ancestors(ShadowIncluding::No) {
+            node.index().hash(&mut hasher);
+            if let Some(element) = node.downcast::<Element>() {
+                element.local_name().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
     pub(crate) fn serialize_and_cache_subtree(&self, cx: &mut js::context::JSContext) {
+        self.owner_window()
+            .image_cache()
+            .set_svg_place(&self.uuid, self.place());
         let document_fragment = self.owner_document().CreateDocumentFragment(cx);
         let cloned_node = Node::clone(
             cx,

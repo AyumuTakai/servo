@@ -43,7 +43,7 @@ use crate::image_cache::KeyCacheState::PipelineClosed;
 /// How long deleting an image from WebRender is postponed. An image that has been replaced (or removed) can still be
 /// referenced by the display list WebRender is holding until the *new* display list arrives. Deleting the image
 /// right away made WebRender draw nothing for the frames in between (a visible flicker of SVG content that is updated).
-const IMAGE_DELETE_DELAY: Duration = Duration::from_millis(400);
+const IMAGE_DELETE_DELAY: Duration = Duration::from_millis(1000);
 
 struct DeferredDelete {
     due: Instant,
@@ -917,6 +917,7 @@ impl ImageCacheFactory for ImageCacheFactoryImpl {
             })),
             svg_id_image_id_map: Arc::new(Mutex::new(FxHashMap::default())),
             last_rasterized: Arc::new(Mutex::new(FxHashMap::default())),
+            svg_places: Arc::new(Mutex::new(FxHashMap::default())),
             broken_image_icon_data: self.broken_image_icon_data.clone(),
             thread_pool: self.thread_pool.clone(),
             usvg_options: Arc::new(opt),
@@ -942,6 +943,9 @@ pub struct ImageCacheImpl {
     /// The latest rasterization of each SVG element, kept for a short while after the element was invalidated, so that
     /// layout can keep showing it until the new rasterization is ready (see `stale_rasterized_image`).
     last_rasterized: Arc<Mutex<FxHashMap<Uuid, LastRasterized>>>,
+    /// The place (a key made from the position in the document) of each SVG element. The last rasterization of a place is
+    /// kept in `last_rasterized` under the id of the place, for the next element at that place.
+    svg_places: Arc<Mutex<FxHashMap<Uuid, Uuid>>>,
     /// The data to use for the broken image icon used when images cannot load.
     broken_image_icon_data: Arc<Vec<u8>>,
     /// Thread pool for image decoding. This is shared with other [`ImageCache`]s in the
@@ -1139,6 +1143,16 @@ impl ImageCache for ImageCacheImpl {
                 let now = Instant::now();
                 let mut last = self.last_rasterized.lock();
                 last.retain(|_, entry| now.duration_since(entry.touched) < Duration::from_secs(60));
+                if let Some(place) = self.svg_places.lock().get(&svg_id).copied() {
+                    last.insert(
+                        place,
+                        LastRasterized {
+                            image: result.clone(),
+                            evicted: None,
+                            touched: now,
+                        },
+                    );
+                }
                 last.insert(
                     svg_id,
                     LastRasterized {
@@ -1302,19 +1316,47 @@ impl ImageCache for ImageCacheImpl {
 
     fn stale_rasterized_image(&self, svg_id: &Uuid) -> Option<RasterImage> {
         let last = self.last_rasterized.lock();
-        let entry = last.get(svg_id)?;
         // The image is deleted from WebRender `IMAGE_DELETE_DELAY` after the eviction; stop using it a little before that.
-        let usable = entry
-            .evicted
-            .is_none_or(|at| at.elapsed() + Duration::from_millis(50) < IMAGE_DELETE_DELAY);
-        usable.then(|| entry.image.clone())
+        let usable = |entry: &LastRasterized| {
+            entry
+                .evicted
+                .is_none_or(|at| at.elapsed() + Duration::from_millis(50) < IMAGE_DELETE_DELAY)
+        };
+        if let Some(entry) = last.get(svg_id)
+            && usable(entry)
+        {
+            return Some(entry.image.clone());
+        }
+        // A new element at the place of an element that was removed: show that element's last image.
+        let place = self.svg_places.lock().get(svg_id).copied()?;
+        let entry = last.get(&place)?;
+        usable(entry).then(|| entry.image.clone())
+    }
+
+    fn set_svg_place(&self, svg_id: &Uuid, place: u64) {
+        self.svg_places
+            .lock()
+            .insert(*svg_id, Uuid::from_u64_pair(place, 0x706c_6163_65));
     }
 
     fn evict_rasterized_image(&self, svg_id: &Uuid) {
-        if let Some(entry) = self.last_rasterized.lock().get_mut(svg_id) {
+        {
+            let mut last = self.last_rasterized.lock();
             let now = Instant::now();
-            entry.evicted.get_or_insert(now);
-            entry.touched = now;
+            let mut own_image_id = None;
+            if let Some(entry) = last.get_mut(svg_id) {
+                own_image_id = Some(entry.image.id);
+                entry.evicted.get_or_insert(now);
+                entry.touched = now;
+            }
+            // The last image of the place goes the same way, unless a newer element has replaced it already.
+            if let Some(place) = self.svg_places.lock().get(svg_id).copied() &&
+                let Some(entry) = last.get_mut(&place) &&
+                own_image_id == Some(entry.image.id)
+            {
+                entry.evicted.get_or_insert(now);
+                entry.touched = now;
+            }
         }
         let mut store = self.store.lock();
         if let Some(mapped_image_id) = self.svg_id_image_id_map.lock().remove(svg_id) {
