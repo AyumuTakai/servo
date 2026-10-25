@@ -5,6 +5,7 @@
 pub mod audio_decoder;
 pub mod audio_sink;
 pub mod audio_stream_reader;
+mod autoplug;
 mod datachannel;
 mod device_monitor;
 pub mod media_capture;
@@ -93,8 +94,7 @@ impl GStreamerBackend {
         // Embedders that know their platform's VA-API driver works can keep the va plugins
         // (hardware decoding) by setting `SERVO_MEDIA_KEEP_VA`.
         #[cfg(target_os = "linux")]
-        if std::env::var_os("SERVO_MEDIA_KEEP_VA").is_none()
-        {
+        if std::env::var_os("SERVO_MEDIA_KEEP_VA").is_none() {
             // Remove the va plugins that have some issues on certain platforms.
             // When the driver is fixed we will remove this.
             let registry = gstreamer::Registry::get();
@@ -138,6 +138,9 @@ impl GStreamerBackend {
         if !errors.is_empty() {
             return Err(ErrorLoadingPlugins(errors));
         }
+
+        // Only what the embedder allows is autoplugged, and nothing fetches URIs past Servo.
+        autoplug::restrict_registry(std::env::var(autoplug::ALLOWLIST_ENV).ok().as_deref());
 
         type MediaInstancesVec = Vec<(usize, Weak<Mutex<dyn MediaInstance>>)>;
         let instances: HashMap<ClientContextId, MediaInstancesVec> = Default::default();
