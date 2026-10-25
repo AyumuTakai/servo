@@ -1497,8 +1497,6 @@ impl LayoutThread {
 
         // This will be done during `StackingContextTree::new` below
         self.need_containing_block_calculation.set(false);
-        crate::display_list::stacking_context::VISITED_BOX_FRAGMENTS.with(|v| v.borrow_mut().clear());
-        crate::display_list::stacking_context::VISITED_TAGS.with(|v| v.borrow_mut().clear());
 
         // Build the StackingContextTree. This turns the `FragmentTree` into a
         // tree of fragments in CSS painting order and also creates all
@@ -1729,6 +1727,11 @@ impl LayoutThread {
             reflow_phases_run: ReflowPhasesRun::BuiltDisplayList,
             ..Default::default()
         })
+    }
+
+    /// The current fragment tree (for layout queries that look for the fragments of a node in it).
+    pub(crate) fn current_fragment_tree(&self) -> Option<Rc<FragmentTree>> {
+        self.fragment_tree.borrow().clone()
     }
 
     pub(crate) fn ensure_containing_block_calculation(&self) {

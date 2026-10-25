@@ -472,12 +472,6 @@ pub(crate) enum StackingContextBuildMode {
     SkipHoisted,
 }
 
-thread_local! {
-    pub(crate) static VISITED_TAGS: std::cell::RefCell<std::collections::HashSet<String>> = Default::default();
-    /// (診断用・一時)最後に、スタッキング文脈の木を作ったときに辿った箱の断片。
-    pub(crate) static VISITED_BOX_FRAGMENTS: std::cell::RefCell<std::collections::HashSet<usize>> = Default::default();
-}
-
 impl Fragment {
     pub(crate) fn build_stacking_context_tree(
         &self,
@@ -596,10 +590,6 @@ impl BoxFragment {
         parent_stacking_context: &mut StackingContext,
         text_decorations: &Rc<Vec<FragmentTextDecoration>>,
     ) {
-        VISITED_BOX_FRAGMENTS.with(|v| v.borrow_mut().insert(Arc::as_ptr(self) as usize));
-        if let Some(tag) = self.base.tag {
-            VISITED_TAGS.with(|v| v.borrow_mut().insert(format!("{:?}", tag.node)));
-        }
         self.clear_stacking_context_tree_traversal_data();
         self.build_stacking_context_tree_maybe_creating_reference_frame(
             fragment,

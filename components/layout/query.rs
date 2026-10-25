@@ -99,6 +99,42 @@ bitflags! {
     }
 }
 
+/// The box fragments of `node` in the current fragment tree, when the fragments that the box of the node
+/// remembers (`LayoutBoxBase::fragments`) are not in it any more. A flex container lays its items out
+/// several times (to measure them), and each layout remembers its fragments; when the last layout is
+/// taken from the layout cache, the box keeps the fragments of an earlier layout, which the stacking
+/// context tree never visited: they have no spatial tree node, and a query on them would answer with an
+/// empty rectangle. Returns `None` when the remembered fragments are the ones of the tree.
+fn current_fragments_if_remembered_ones_are_stale(
+    layout_thread: &LayoutThread,
+    node: ServoLayoutNode<'_>,
+    remembered: &[Fragment],
+) -> Option<Vec<Fragment>> {
+    let stale = remembered
+        .first()
+        .and_then(Fragment::retrieve_box_fragment)
+        .is_some_and(|box_fragment| box_fragment.spatial_tree_node().is_none());
+    if !stale {
+        return None;
+    }
+    let target = node.opaque();
+    let fragment_tree = layout_thread.current_fragment_tree()?;
+    let mut found = Vec::new();
+    fragment_tree.find(|fragment, _, _| {
+        if let Fragment::Box(box_fragment) | Fragment::Float(box_fragment) = fragment &&
+            box_fragment
+                .base
+                .tag
+                .is_some_and(|tag| tag.node == target && tag.pseudo_element_chain.is_empty()) &&
+            box_fragment.spatial_tree_node().is_some()
+        {
+            found.push(fragment.clone());
+        }
+        None::<()>
+    });
+    (!found.is_empty()).then_some(found)
+}
+
 pub(crate) fn process_box_area_request(
     layout_thread: &LayoutThread,
     stacking_context_tree: &StackingContextTree,
@@ -108,7 +144,9 @@ pub(crate) fn process_box_area_request(
 ) -> Option<Rect<Au, CSSPixel>> {
     // Borrow fragments to avoid cloning on this hot path for accessibility and
     // `getBoundingClientRect()`.
-    node.with_fragments(|fragments| {
+    node.with_fragments(|remembered| {
+        let current = current_fragments_if_remembered_ones_are_stale(layout_thread, node, remembered);
+        let fragments = current.as_deref().unwrap_or(remembered);
         let mut rects = fragments
             .iter()
             .filter(|fragment| {
@@ -130,39 +168,6 @@ pub(crate) fn process_box_area_request(
         let Some(transform) =
             root_transform_for_fragments(&stacking_context_tree.paint_info.scroll_tree, fragments)
         else {
-            eprintln!(
-                "[bbox-dbg] no transform: node={:?} fragments={} kinds={:?} {} spatial={:?}",
-                node.opaque(),
-                fragments.len(),
-                fragments
-                    .iter()
-                    .map(|f| match f {
-                        Fragment::Box(_) => "Box",
-                        Fragment::Float(_) => "Float",
-                        Fragment::Positioning(_) => "Positioning",
-                        Fragment::Text(_) => "Text",
-                        Fragment::Image(_) => "Image",
-                        Fragment::IFrame(_) => "IFrame",
-                        Fragment::LayoutRoot(_) => "LayoutRoot",
-                        Fragment::AbsoluteOrFixedPositionedPlaceholder(_) => "Placeholder",
-                    })
-                    .collect::<Vec<_>>(),
-                match fragments.first() {
-                    Some(Fragment::Box(b)) | Some(Fragment::Float(b)) => format!(
-                        "same_node_visited={} visited_in_last_tree={} (set size {})",
-                        b.base.tag.is_some_and(|t| crate::display_list::stacking_context::VISITED_TAGS
-                            .with(|v| v.borrow().contains(&format!("{:?}", t.node)))),
-                        crate::display_list::stacking_context::VISITED_BOX_FRAGMENTS
-                            .with(|v| v.borrow().contains(&(std::sync::Arc::as_ptr(b) as usize))),
-                        crate::display_list::stacking_context::VISITED_BOX_FRAGMENTS.with(|v| v.borrow().len())
-                    ),
-                    _ => "n/a".to_string(),
-                },
-                fragments
-                    .first()
-                    .and_then(Fragment::retrieve_box_fragment)
-                    .map(|b| b.spatial_tree_node().is_some()),
-            );
             return Some(Rect::new(rect_union.origin, Size2D::zero()));
         };
 
@@ -176,7 +181,12 @@ pub(crate) fn process_box_areas_request(
     node: ServoLayoutNode<'_>,
     area: BoxAreaType,
 ) -> CSSPixelRectVec {
-    let fragments = node.fragments_for_pseudo(None);
+    let mut fragments = node.fragments_for_pseudo(None);
+    if let Some(current) =
+        current_fragments_if_remembered_ones_are_stale(layout_thread, node, &fragments)
+    {
+        fragments = current;
+    }
     let transform =
         root_transform_for_fragments(&stacking_context_tree.paint_info.scroll_tree, &fragments);
 

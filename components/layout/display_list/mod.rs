@@ -78,7 +78,7 @@ mod gradient;
 mod hit_test;
 mod paint_timing_handler;
 mod paint_traversal;
-pub(crate) mod stacking_context;
+mod stacking_context;
 
 pub(crate) use hit_test::{ClosestFragmentSearch, HitTest};
 pub(crate) use paint_timing_handler::PaintTimingHandler;
