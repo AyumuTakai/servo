@@ -505,6 +505,41 @@ impl InlineFormattingContextBuilder {
         }
     }
 
+    /// Push an empty text run that only holds the caret of the document selection: for an empty
+    /// text node or an empty editing host, which have no text to put the caret on.
+    pub(crate) fn push_empty_text_run_for_caret<'dom>(&mut self, info: &NodeAndStyleInfo<'dom>) {
+        let box_slot = info.node.is_text_node().then(|| info.node.box_slot());
+        let at = self.current_text_offset;
+        let character_offset = self.current_character_offset;
+        let text_run = ArcRefCell::new(TextRun::new(
+            info.into(),
+            SharedTextRunData {
+                text_content: self.text_content_slot.clone(),
+                inline_styles: self.shared_inline_styles(),
+                character_range_in_ifc_text: character_offset..character_offset,
+                original_offset: self.offset_map.borrow().total_original_size(),
+                selection: AtomicRefCell::new(Some(RangeAny::new(
+                    Some(Utf32CodeUnits(0)),
+                    Some(Utf32CodeUnits(0)),
+                ))),
+                paint_caret: true,
+                offset_map: self.offset_map.clone(),
+            }
+            .into(),
+            at..at,
+            box_slot
+                .as_ref()
+                .and_then(|box_slot| box_slot.take_layout_box_as_text_run()),
+        ));
+        self.inline_items
+            .push(InlineItem::TextRun(text_run.clone()));
+        self.is_empty = false;
+
+        if let Some(box_slot) = box_slot {
+            box_slot.set(LayoutBox::Text(text_run));
+        }
+    }
+
     pub(crate) fn enter_display_contents(&mut self, shared_inline_styles: SharedInlineStyles) {
         self.shared_inline_styles_stack.push(shared_inline_styles);
     }
