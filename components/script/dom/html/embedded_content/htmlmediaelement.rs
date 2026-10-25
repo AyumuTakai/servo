@@ -789,7 +789,8 @@ impl HTMLMediaElement {
             .as_ref()
             .is_some_and(|player| !player.lock().unwrap().paused());
 
-        if self.is_potentially_playing() && !is_playing {
+        let is_potentially_playing = self.is_potentially_playing();
+        if is_potentially_playing && !is_playing {
             if let Some(ref player) = *self.player.borrow() {
                 let player = player.lock().unwrap();
 
@@ -803,7 +804,8 @@ impl HTMLMediaElement {
                     error!("Could not play media: {error:?}");
                 }
             }
-        } else if is_playing &&
+        } else if !is_potentially_playing &&
+            is_playing &&
             let Some(ref player) = *self.player.borrow() &&
             let Err(error) = player.lock().unwrap().pause()
         {
@@ -1633,7 +1635,9 @@ impl HTMLMediaElement {
         // type (including any codecs described by the codecs parameter, for types that define that
         // parameter), represents a type that the user agent knows it cannot render, then end the
         // synchronous section, and jump down to the failed with elements step below.
+        // An empty type says nothing about the resource (Shaka Player sets one).
         if let Some(type_) = element.get_attribute_string_value(&local_name!("type")) &&
+            !type_.is_empty() &&
             ServoMedia::get().can_play_type(&type_) == SupportsMediaType::No
         {
             self.load_from_source_child_failure_steps(cx, source);
