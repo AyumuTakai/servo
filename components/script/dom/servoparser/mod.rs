@@ -16,6 +16,7 @@ use content_security_policy::sandboxing_directive::SandboxingFlagSet;
 use devtools_traits::ScriptToDevtoolsControlMsg;
 use dom_struct::dom_struct;
 use embedder_traits::resources::{self, Resource};
+use embedder_traits::{DownloadEvent, EmbedderMsg, ScriptToEmbedderChan};
 use encoding_rs::{Encoding, UTF_8};
 use html5ever::buffer_queue::BufferQueue;
 use html5ever::tendril::StrTendril;
@@ -945,6 +946,95 @@ pub(crate) struct ParserContext {
     /// will be a non-aliased copy of the origin.
     source_origin: Option<MutableOrigin>,
     document: Option<Trusted<Document>>,
+    /// Set when this response is a download (attachment or undisplayable type): the body goes to a
+    /// file instead of the parser.
+    download: Option<DownloadSink>,
+}
+
+/// Static id source for downloads.
+static NEXT_DOWNLOAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Writes a download's body to `<network_download_dir>/servo-<id>.part` and reports progress to the
+/// embedder. The embedder cancels by removing the file.
+struct DownloadSink {
+    id: u64,
+    webview_id: WebViewId,
+    chan: ScriptToEmbedderChan,
+    file: std::fs::File,
+    path: std::path::PathBuf,
+    received: u64,
+    reported_at: std::time::Instant,
+}
+
+impl DownloadSink {
+    fn send(&self, event: DownloadEvent) {
+        let _ = self.chan.send(EmbedderMsg::DownloadEvent(self.webview_id, event));
+    }
+
+    /// Returns false when the download should stop (cancelled or failed).
+    fn write(&mut self, payload: &[u8]) -> bool {
+        use std::io::Write;
+        if !self.path.exists() {
+            return false; // The embedder removed the file: cancelled.
+        }
+        if let Err(e) = self.file.write_all(payload) {
+            self.send(DownloadEvent::Finished {
+                id: self.id,
+                error: Some(e.to_string()),
+            });
+            return false;
+        }
+        self.received += payload.len() as u64;
+        if self.reported_at.elapsed() >= std::time::Duration::from_millis(100) {
+            self.reported_at = std::time::Instant::now();
+            self.send(DownloadEvent::Progress {
+                id: self.id,
+                received: self.received,
+            });
+        }
+        true
+    }
+
+    fn finish(self, status: &Result<(), NetworkError>) {
+        if !self.path.exists() {
+            return;
+        }
+        let error = status.as_ref().err().map(|e| format!("{e:?}"));
+        self.send(DownloadEvent::Finished { id: self.id, error });
+    }
+}
+
+/// The file name from a `Content-Disposition` value (`filename*=UTF-8''…` first, then `filename=`).
+fn disposition_filename(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if let Some(i) = lower.find("filename*=") {
+        let rest = value[i + "filename*=".len()..].split(';').next()?.trim();
+        let encoded = rest.splitn(3, '\'').nth(2).unwrap_or(rest);
+        let decoded = percent_encoding::percent_decode_str(encoded).decode_utf8_lossy().into_owned();
+        if !decoded.is_empty() {
+            return Some(decoded);
+        }
+    }
+    let i = lower.find("filename=")?;
+    let rest = value[i + "filename=".len()..].split(';').next()?.trim();
+    let name = rest.trim_matches('"');
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Types the document loader displays itself. Other `application/*` (and similar) types are downloads.
+fn is_displayable_type(mime: &Mime) -> bool {
+    match mime.type_().as_str() {
+        "text" | "image" | "video" | "audio" => true,
+        "application" => {
+            let sub = mime.subtype().as_str();
+            matches!(
+                sub,
+                "xhtml+xml" | "xml" | "json" | "javascript" | "x-javascript" | "ecmascript" | "ld+json" | "svg+xml"
+            ) || sub.ends_with("+json") ||
+                sub.ends_with("+xml")
+        },
+        _ => false,
+    }
 }
 
 impl ParserContext {
@@ -978,6 +1068,7 @@ impl ParserContext {
             target_snapshot_params,
             source_origin,
             document: None,
+            download: None,
         }
     }
 
@@ -1415,11 +1506,19 @@ impl ParserContext {
             self.source_origin.clone(),
         );
 
+        // A response that is an attachment or cannot be displayed becomes a download: the body goes
+        // to a file, and the navigation is aborted like for a 204 (the current page stays).
+        let is_download = error.is_none() &&
+            metadata
+                .as_ref()
+                .is_some_and(|metadata| self.start_download_if_wanted(script_thread, metadata, content_type.as_ref()));
+
         let Some(document) = script_thread.handle_page_headers_available(
             self.webview_id,
             self.pipeline_id,
             metadata.as_ref(),
             origin.clone(),
+            is_download,
             cx,
         ) else {
             return;
@@ -1570,7 +1669,77 @@ impl ParserContext {
         }
     }
 
+    /// Starts a download when the (main frame) response is an attachment or an undisplayable type
+    /// and the embedder set `network_download_dir`. Returns whether a download started.
+    fn start_download_if_wanted(
+        &mut self,
+        script_thread: &ScriptThread,
+        metadata: &Metadata,
+        content_type: Option<&Mime>,
+    ) -> bool {
+        let dir = pref!(network_download_dir);
+        if dir.is_empty() || self.parent_info.is_some() || !metadata.status.in_range(200..=299) {
+            return false;
+        }
+        let disposition = metadata
+            .headers
+            .as_ref()
+            .and_then(|headers| headers.get(http::header::CONTENT_DISPOSITION))
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let attachment = disposition
+            .as_deref()
+            .is_some_and(|value| value.trim_start().to_ascii_lowercase().starts_with("attachment"));
+        let undisplayable = content_type.is_some_and(|mime| !is_displayable_type(mime));
+        if !attachment && !undisplayable {
+            return false;
+        }
+        let id = NEXT_DOWNLOAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::path::Path::new(&dir).join(format!("servo-{id}.part"));
+        let Ok(file) = std::fs::File::create(&path) else {
+            return false;
+        };
+        let filename = disposition.as_deref().and_then(disposition_filename).or_else(|| {
+            metadata
+                .final_url
+                .path_segments()
+                .and_then(|mut segments| segments.next_back().map(str::to_owned))
+                .filter(|name| !name.is_empty())
+        });
+        let length = metadata
+            .headers
+            .as_ref()
+            .and_then(|headers| headers.get(http::header::CONTENT_LENGTH))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
+        let sink = DownloadSink {
+            id,
+            webview_id: self.webview_id,
+            chan: script_thread.embedder_sender(),
+            file,
+            path: path.clone(),
+            received: 0,
+            reported_at: std::time::Instant::now(),
+        };
+        sink.send(DownloadEvent::Started {
+            id,
+            url: metadata.final_url.to_string(),
+            filename,
+            mime: content_type.map(|mime| mime.to_string()),
+            length,
+            path: path.to_string_lossy().into_owned(),
+        });
+        self.download = Some(sink);
+        true
+    }
+
     pub(crate) fn process_response_chunk(&mut self, cx: &mut JSContext, payload: Bytes) {
+        if let Some(sink) = self.download.as_mut() {
+            if !sink.write(payload.as_ref()) {
+                self.download = None;
+            }
+            return;
+        }
         if self.is_synthesized_document {
             return;
         }
@@ -1606,6 +1775,10 @@ impl ParserContext {
         status: Result<(), NetworkError>,
         timing: ResourceFetchTiming,
     ) {
+        if let Some(sink) = self.download.take() {
+            sink.finish(&status);
+            return;
+        }
         let parser = self.parser.as_ref().map(|parser| parser.root());
         if parser.as_ref().is_some_and(|parser| parser.aborted.get()) ||
             self.is_synthesized_document

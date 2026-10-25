@@ -609,6 +609,11 @@ impl ServoInner {
                     webview.set_load_status(load_status);
                 }
             },
+            EmbedderMsg::DownloadEvent(webview_id, event) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview.delegate().notify_download_event(webview, event);
+                }
+            },
             EmbedderMsg::NotifyFullscreenStateChanged(webview_id, fullscreen) => {
                 if let Some(webview) = self.get_webview_handle(webview_id) {
                     webview

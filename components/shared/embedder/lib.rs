@@ -464,9 +464,36 @@ pub struct BluetoothDeviceDescription {
     pub name: String,
 }
 
+/// Progress of a download that Servo started because a navigation response was an attachment
+/// or a type that cannot be displayed (see the `network_download_dir` preference). Servo writes
+/// the body to `path`; removing that file cancels the download.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum DownloadEvent {
+    Started {
+        id: u64,
+        url: String,
+        /// The file name suggested by `Content-Disposition` or the URL.
+        filename: Option<String>,
+        mime: Option<String>,
+        length: Option<u64>,
+        path: String,
+    },
+    Progress {
+        id: u64,
+        received: u64,
+    },
+    Finished {
+        id: u64,
+        /// `None` if the whole body was written to the path.
+        error: Option<String>,
+    },
+}
+
 /// Messages towards the embedder.
 #[derive(Deserialize, IntoStaticStr, Serialize)]
 pub enum EmbedderMsg {
+    /// A download started, advanced or finished.
+    DownloadEvent(WebViewId, DownloadEvent),
     /// A status message to be displayed by the browser chrome.
     Status(WebViewId, Option<String>),
     /// Alerts the embedder that the current page has changed its title.
