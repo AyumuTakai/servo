@@ -36,11 +36,11 @@ impl RequestInterceptor {
     fn read_body_if_wanted(request: &Request) -> Result<Option<Vec<u8>>, NetworkError> {
         let prefs = servo_config::prefs::get();
         let wanted = &prefs.network_intercept_body_host;
-        if wanted.is_empty() || request.url().host_str() != Some(wanted.as_str()) {
+        if wanted.is_empty() || request.current_url().host_str() != Some(wanted.as_str()) {
             return Ok(None);
         }
         let same_origin =
-            matches!(&request.origin, Origin::Origin(origin) if *origin == request.url().origin());
+            matches!(&request.origin, Origin::Origin(origin) if *origin == request.current_url().origin());
         if !same_origin {
             return Ok(None);
         }
@@ -110,7 +110,9 @@ impl RequestInterceptor {
         };
         let web_resource_request = WebResourceRequest {
             method: request.method.clone(),
-            url: request.url().into_url(),
+            // The URL being fetched now: after a redirect, the embedder must see where the
+            // request goes (the first URL of the list is where it started).
+            url: request.current_url().into_url(),
             headers: request.headers.clone(),
             destination: request.destination,
             referrer_url: request.referrer.to_url().map(|url| url.as_url().clone()),
