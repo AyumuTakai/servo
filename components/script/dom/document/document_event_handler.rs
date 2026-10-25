@@ -540,18 +540,23 @@ impl DocumentEventHandler {
             FireMouseEventType::Enter | FireMouseEventType::Leave
         ));
 
-        let common_ancestor = match related_target.as_ref() {
-            Some(related_target) => event_target
-                .common_ancestor_in_flat_tree(cx.no_gc(), related_target)
-                .unwrap_or_else(|| DomRoot::from_ref(event_target)),
-            None => DomRoot::from_ref(event_target),
-        };
+        // Without a related target (the pointer comes from outside of the page, or this is the first
+        // move), every inclusive ancestor of the target is entered or left.
+        // The same goes for a related target that is not in the same tree any more (an element that
+        // was removed from the page, such as a menu that was closed): there is no common ancestor.
+        let common_ancestor = related_target.as_ref().and_then(|related_target| {
+            event_target.common_ancestor_in_flat_tree(cx.no_gc(), related_target)
+        });
 
         // We need to create a target chain in case the event target shares
         // its boundaries with its ancestors.
         let mut targets: Vec<_> = event_target
             .inclusive_ancestors_in_flat_tree_unrooted(cx.no_gc())
-            .take_while(|node| *node != *common_ancestor)
+            .take_while(|node| {
+                common_ancestor
+                    .as_ref()
+                    .is_none_or(|common_ancestor| *node != **common_ancestor)
+            })
             .map(|node| node.as_rooted())
             .collect();
 
@@ -637,7 +642,20 @@ impl DocumentEventHandler {
             .most_recent_mousemove_point
             .replace(Some(hit_test_result.point_in_frame));
         if old_mouse_move_point == Some(hit_test_result.point_in_frame) {
-            return;
+            // The pointer did not move, but the page may have changed under it (an element that
+            // appeared there): only skip the event when the element under the pointer is the same.
+            let same_target = hit_test_result
+                .node
+                .inclusive_ancestors(ShadowIncluding::Yes)
+                .find_map(DomRoot::downcast::<Element>)
+                .is_some_and(|new_target| {
+                    self.current_hover_target
+                        .get()
+                        .is_some_and(|old_target| *old_target == *new_target)
+                });
+            if same_target {
+                return;
+            }
         }
 
         // Update the cursor when the mouse moves, if it has changed.
