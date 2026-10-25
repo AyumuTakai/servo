@@ -214,6 +214,9 @@ Document includes DocumentOrShadowRoot;
 partial interface Document {
   // CaretPosition? caretPositionFromPoint(double x, double y, optional CaretPositionFromPointOptions options = {});
   readonly attribute Element? scrollingElement;
+
+  // Legacy (WebKit/Blink) extension, also used by pages that place a caret from a point.
+  Range? caretRangeFromPoint(double x, double y);
 };
 
 // dictionary CaretPositionFromPointOptions {
