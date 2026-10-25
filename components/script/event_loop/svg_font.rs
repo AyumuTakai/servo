@@ -25,28 +25,52 @@ use webrender_api::FontVariation;
 /// Used to dynamically query fonts used in SVGs and insert them into the fontDB used when rasterizing.
 #[derive(MallocSizeOf)]
 pub struct SvgFontResolver {
-    /// Cache for Font to ID
-    font_id_cache: Mutex<FxHashMap<Font, fontdb::ID>>,
-    fallback_id_cache: Mutex<FxHashMap<char, Vec<fontdb::ID>>>,
+    /// Cache for Font to the font data. The `fontdb::ID` of a face is only valid in the database it was loaded
+    /// into, and every SVG tree gets its own copy of the database, so IDs cannot be cached across trees.
+    #[ignore_malloc_size_of = "shared font data"]
+    font_cache: Mutex<FxHashMap<Font, FontSource>>,
+    #[ignore_malloc_size_of = "shared font data"]
+    fallback_cache: Mutex<FxHashMap<char, Vec<FontSource>>>,
     #[conditional_malloc_size_of]
     context: Arc<FontContext>,
+}
+
+type FontData = Arc<dyn AsRef<[u8]> + Send + Sync>;
+
+/// The binary data of a font, and the index of the face in it.
+#[derive(Clone)]
+struct FontSource {
+    data: FontData,
+    index: u32,
+}
+
+impl FontSource {
+    /// The ID of this face in `database`, loading the font into it when it is not there yet.
+    fn id_in(&self, database: &mut Arc<fontdb::Database>) -> Option<fontdb::ID> {
+        let loaded = database.faces().find(|face| {
+            face.index == self.index &&
+                matches!(&face.source, fontdb::Source::Binary(data) if Arc::ptr_eq(data, &self.data))
+        });
+        if let Some(face) = loaded {
+            return Some(face.id);
+        }
+        let ids =
+            Arc::make_mut(database).load_font_source(fontdb::Source::Binary(self.data.clone()));
+        ids.get(self.index as usize).copied()
+    }
 }
 
 impl SvgFontResolver {
     pub(crate) fn new(context: Arc<FontContext>) -> Self {
         Self {
-            font_id_cache: Mutex::new(FxHashMap::default()),
-            fallback_id_cache: Mutex::new(FxHashMap::default()),
+            font_cache: Mutex::new(FxHashMap::default()),
+            fallback_cache: Mutex::new(FxHashMap::default()),
             context,
         }
     }
 
-    /// Insert the font into the database in [`SvgFontResolver`] and into the cache.
-    fn insert_into_database(
-        &self,
-        font: &Font,
-        database: &mut Arc<fontdb::Database>,
-    ) -> Option<fontdb::ID> {
+    /// Look up the font in the font system and put it into the cache.
+    fn find_source(&self, font: &Font) -> Option<FontSource> {
         let font_descriptor = font_to_fontdescriptor(font);
 
         for family in font.families() {
@@ -74,14 +98,15 @@ impl SvgFontResolver {
             let Ok(data_and_index) = font_ref.font_data_and_index() else {
                 continue;
             };
-            let ids = Arc::make_mut(database).load_font_source(fontdb::Source::Binary(Arc::new(
-                data_and_index.data.clone(),
-            )));
-
-            if let Some(id) = ids.get(data_and_index.index as usize).copied() {
-                self.font_id_cache.lock().unwrap().insert(font.clone(), id);
-                return Some(id);
-            }
+            let source = FontSource {
+                data: Arc::new(data_and_index.data.clone()),
+                index: data_and_index.index,
+            };
+            self.font_cache
+                .lock()
+                .unwrap()
+                .insert(font.clone(), source.clone());
+            return Some(source);
         }
 
         None
@@ -157,13 +182,9 @@ fn fontfamily_to_singlefontfamily(family: &FontFamily) -> SingleFontFamily {
 
 impl FontResolver for SvgFontResolver {
     fn resolve(&self, font: &Font, database: &mut Arc<fontdb::Database>) -> Option<fontdb::ID> {
-        {
-            let id_cache = self.font_id_cache.lock().unwrap();
-            if let Some(font_id) = id_cache.get(font) {
-                return Some(*font_id);
-            }
-        }
-        self.insert_into_database(font, database)
+        let cached = self.font_cache.lock().unwrap().get(font).cloned();
+        let source = cached.or_else(|| self.find_source(font))?;
+        source.id_in(database)
     }
 
     fn resolve_fallback(
@@ -172,13 +193,18 @@ impl FontResolver for SvgFontResolver {
         excluded: &[fontdb::ID],
         database: &mut Arc<fontdb::Database>,
     ) -> Option<fontdb::ID> {
-        {
-            let id_cache = self.fallback_id_cache.lock().unwrap();
-            if let Some(font_id) = id_cache
-                .get(&character)
-                .and_then(|font_ids| font_ids.iter().find(|font_id| !excluded.contains(font_id)))
-            {
-                return Some(*font_id);
+        let cached = self
+            .fallback_cache
+            .lock()
+            .unwrap()
+            .get(&character)
+            .cloned()
+            .unwrap_or_default();
+        for source in cached {
+            if let Some(id) = source.id_in(database) {
+                if !excluded.contains(&id) {
+                    return Some(id);
+                }
             }
         }
         let fallback_options = FallbackFontSelectionOptions::new(
@@ -212,25 +238,25 @@ impl FontResolver for SvgFontResolver {
                     continue;
                 };
 
-                let ids = Arc::make_mut(database).load_font_source(fontdb::Source::Binary(
-                    Arc::new(data_and_index.data.clone()),
-                ));
-
-                let Some(id) = ids.get(data_and_index.index as usize) else {
+                let source = FontSource {
+                    data: Arc::new(data_and_index.data.clone()),
+                    index: data_and_index.index,
+                };
+                let Some(id) = source.id_in(database) else {
                     continue;
                 };
 
-                if excluded.contains(id) {
+                if excluded.contains(&id) {
                     continue;
                 }
 
-                self.fallback_id_cache
+                self.fallback_cache
                     .lock()
                     .unwrap()
                     .entry(character)
                     .or_default()
-                    .push(*id);
-                return Some(*id);
+                    .push(source);
+                return Some(id);
             }
         }
         None
