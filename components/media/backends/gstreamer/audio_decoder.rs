@@ -2,8 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::io::{Cursor, Read};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use byte_slice_cast::*;
 use gstreamer;
@@ -13,6 +14,15 @@ use gstreamer_audio;
 use servo_media_audio::decoder::{
     AudioDecoder, AudioDecoderCallbacks, AudioDecoderError, AudioDecoderOptions,
 };
+
+/// Upper bound on the samples one decode may produce, over all channels (256 MiB of `f32`, about
+/// 11 minutes of 48 kHz stereo). A few megabytes of compressed silence would otherwise decode to
+/// gigabytes, and the decoded audio is kept in memory whole.
+const MAX_DECODED_SAMPLES: usize = 1 << 26;
+
+/// How long a decode may take before it is given up (a stalled decoder would otherwise keep its
+/// thread and pipeline forever).
+const DECODE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct GStreamerAudioDecoderProgress(
     gstreamer::buffer::MappedBuffer<gstreamer::buffer::Readable>,
@@ -82,6 +92,7 @@ impl AudioDecoder for GStreamerAudioDecoder {
         let pipeline_ = pipeline.downgrade();
         let callbacks_ = callbacks.clone();
         let sender_ = sender.clone();
+        let decoded_samples = Arc::new(AtomicUsize::new(0));
         // Initial pipeline looks like
         //
         // appsrc ! decodebin2! ...
@@ -183,6 +194,8 @@ impl AudioDecoder for GStreamerAudioDecoder {
 
                 let pipeline_ = pipeline.downgrade();
                 let callbacks_ = callbacks.clone();
+                let decoded_samples = decoded_samples.clone();
+                let sender = sender.clone();
                 deinterleave.connect_pad_added(move |_, src_pad| {
                     // A new pad for a planar channel was added in deinterleave.
                     // Plug in an appsink so we can pull the data from each channel.
@@ -222,6 +235,8 @@ impl AudioDecoder for GStreamerAudioDecoder {
                         sink.set_property("sync", false);
 
                         let callbacks_ = callbacks.clone();
+                        let decoded_samples = decoded_samples.clone();
+                        let sender = sender.clone();
                         appsink.set_callbacks(
                             gstreamer_app::AppSinkCallbacks::builder()
                                 .new_sample(move |appsink| {
@@ -250,6 +265,21 @@ impl AudioDecoder for GStreamerAudioDecoder {
                                         ));
                                         gstreamer::FlowError::Error
                                     })?;
+
+                                    let samples = buffer.size() / std::mem::size_of::<f32>() *
+                                        positions.len();
+                                    if decoded_samples.fetch_add(samples, Ordering::Relaxed) +
+                                        samples >
+                                        MAX_DECODED_SAMPLES
+                                    {
+                                        callbacks_.error(AudioDecoderError::Backend(
+                                            "Decoded audio is too long".to_owned(),
+                                        ));
+                                        // Stop now (the decoding thread sets the pipeline to
+                                        // NULL), not when the error has made its way upstream.
+                                        let _ = sender.lock().unwrap().send(());
+                                        return Err(gstreamer::FlowError::Error);
+                                    }
 
                                     for position in positions.iter() {
                                         let buffer = buffer.clone();
@@ -342,8 +372,11 @@ impl AudioDecoder for GStreamerAudioDecoder {
         });
 
         appsrc.set_format(gstreamer::Format::Bytes);
-        appsrc.set_block(true);
-
+        // The whole input is in memory already: it goes in as one buffer, and pushing never
+        // blocks. With a blocking push of chunks, a pipeline that stopped (an error, or too much
+        // decoded audio) left this thread waiting in `push_buffer` forever.
+        appsrc.set_block(false);
+        appsrc.set_max_bytes(data.len() as u64);
         let bus = match pipeline.bus() {
             Some(bus) => bus,
             None => {
@@ -379,32 +412,19 @@ impl AudioDecoder for GStreamerAudioDecoder {
 
         if pipeline.set_state(gstreamer::State::Playing).is_err() {
             callbacks.error(AudioDecoderError::StateChangeFailed);
+            let _ = pipeline.set_state(gstreamer::State::Null);
             return;
         }
 
-        let max_bytes = appsrc.max_bytes() as usize;
-        let data_len = data.len();
-        let mut reader = Cursor::new(data);
-        while (reader.position() as usize) < data_len {
-            let data_left = data_len - reader.position() as usize;
-            let buffer_size = if data_left < max_bytes {
-                data_left
-            } else {
-                max_bytes
-            };
-            let mut buffer = gstreamer::Buffer::with_size(buffer_size).unwrap();
-            {
-                let buffer = buffer.get_mut().unwrap();
-                let mut map = buffer.map_writable().unwrap();
-                let buffer = map.as_mut_slice();
-                let _ = reader.read(buffer);
-            }
-            let _ = appsrc.push_buffer(buffer);
-        }
+        let _ = appsrc.push_buffer(gstreamer::Buffer::from_mut_slice(data));
         let _ = appsrc.end_of_stream();
 
         // Wait until we get an error or EOS.
-        receiver.recv().unwrap();
+        if receiver.recv_timeout(DECODE_TIMEOUT).is_err() {
+            callbacks.error(AudioDecoderError::Backend(
+                "Audio decoding timed out".to_owned(),
+            ));
+        }
         let _ = pipeline.set_state(gstreamer::State::Null);
     }
 }

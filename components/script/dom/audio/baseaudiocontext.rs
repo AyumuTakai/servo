@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -561,25 +560,25 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
                 .ready(move |channel_count| {
                     decoded_audio
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|e| e.into_inner())
                         .resize(channel_count as usize, Vec::new());
                 })
                 .progress(move |buffer, channel_pos_mask| {
-                    let mut decoded_audio = decoded_audio_.lock().unwrap();
-                    let mut channels = channels.lock().unwrap();
-                    let channel = match channels.entry(channel_pos_mask) {
-                        Entry::Occupied(entry) => *entry.get(),
-                        Entry::Vacant(entry) => {
-                            let x = (channel_pos_mask as f32).log2() as usize;
-                            *entry.insert(x)
-                        },
-                    };
-                    decoded_audio[channel].extend_from_slice((*buffer).as_ref());
+                    let mut decoded_audio = decoded_audio_.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut channels = channels.lock().unwrap_or_else(|e| e.into_inner());
+                    // Channels are numbered in the order their positions first show up. The bit of
+                    // the position mask is not an index: a 4-channel layout can use bit 8 (rear
+                    // centre), and indexing with it panicked.
+                    let next = channels.len();
+                    let channel = *channels.entry(channel_pos_mask).or_insert(next);
+                    if let Some(samples) = decoded_audio.get_mut(channel) {
+                        samples.extend_from_slice((*buffer).as_ref());
+                    }
                 })
                 .eos(move || {
                     task_source.queue(task!(audio_decode_eos: move |cx| {
                         let this = this.root();
-                        let decoded_audio = decoded_audio__.lock().unwrap();
+                        let decoded_audio = decoded_audio__.lock().unwrap_or_else(|e| e.into_inner());
                         let length = if !decoded_audio.is_empty() {
                             decoded_audio[0].len()
                         } else {
@@ -593,11 +592,16 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
                             this.sample_rate,
                             Some(decoded_audio.as_slice()),
                         );
-                        rooted!(&in(cx) let resolver = this
+                        // The decoder may report an error and then the end (or the other way
+                        // round); only the first settles the promise.
+                        let Some(resolver) = this
                             .decode_resolvers
                             .safe_borrow_mut(cx.no_gc())
                             .remove(&uuid_)
-                            .expect("resolver should exist"));
+                        else {
+                            return;
+                        };
+                        rooted!(&in(cx) let resolver = resolver);
                         let promise = resolver.promise.root(cx);
 
                         if let Some(callback) = &resolver.success_callback {
@@ -609,11 +613,14 @@ impl BaseAudioContextMethods<crate::DomTypeHolder> for BaseAudioContext {
                 .error(move |error| {
                     task_source_clone.queue(task!(audio_decode_eos: move |cx| {
                         let this = this_.root();
-                        rooted!(&in(cx) let resolver = this
+                        let Some(resolver) = this
                             .decode_resolvers
                             .safe_borrow_mut(cx.no_gc())
                             .remove(&uuid)
-                            .expect("resolver should exist"));
+                        else {
+                            return;
+                        };
+                        rooted!(&in(cx) let resolver = resolver);
                         let promise = resolver.promise.root(cx);
 
                         if let Some(callback) = &resolver.error_callback {
