@@ -794,23 +794,6 @@ impl GStreamerPlayer {
                 }
             }
 
-            // A media source can add a stream after the first stream collection (the source
-            // buffers reach gstmse one after the other, `mse.rs`): GstPlay selects the streams of
-            // the first collection only, so a video or an audio stream added later stayed
-            // unselected (no picture, `videoWidth` 0, or no sound). Select it.
-            if inner.stream_type == StreamType::MediaSource {
-                if !info.video_streams().is_empty() && inner.player.current_video_track().is_none()
-                {
-                    let _ = inner.player.set_video_track(0);
-                    inner.player.set_video_track_enabled(true);
-                }
-                if !info.audio_streams().is_empty() && inner.player.current_audio_track().is_none()
-                {
-                    let _ = inner.player.set_audio_track(0);
-                    inner.player.set_audio_track_enabled(true);
-                }
-            }
-
             inner.last_metadata = Some(metadata.clone());
             gstreamer::info!(
                 inner.cat,
