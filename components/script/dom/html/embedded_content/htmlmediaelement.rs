@@ -2866,8 +2866,21 @@ impl HTMLMediaElement {
         metadata: &servo_media::player::metadata::Metadata,
     ) {
         // The following steps should be run once on the initial `metadata` signal from the media
-        // engine.
+        // engine. Later, only a change of the video dimensions is applied (a quality switch, or a
+        // video stream that a media source adds after the first metadata): update videoWidth and
+        // videoHeight and fire resize.
         if self.ready_state.get() != ReadyState::HaveNothing {
+            if let Some(video_element) = self.downcast::<HTMLVideoElement>() &&
+                metadata.width > 0 &&
+                metadata.height > 0 &&
+                video_element.set_natural_dimensions(
+                    cx.no_gc(),
+                    Some(metadata.width),
+                    Some(metadata.height),
+                )
+            {
+                self.queue_media_element_task_to_fire_event(atom!("resize"));
+            }
             return;
         }
 

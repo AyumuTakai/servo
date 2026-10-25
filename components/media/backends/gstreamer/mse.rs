@@ -326,6 +326,8 @@ impl MediaSource {
         *self.element.lock().unwrap() = Some(element.clone());
         // SAFETY: both objects are alive; gstmse checks the type of the element.
         unsafe { gst_media_source_attach(self.ptr(), element.as_ptr()) }
+        // SAFETY: the element is the msesrc just attached; the layout is checked first.
+        unsafe { start_at_metadata(element, self.ptr()) };
     }
 
     pub fn detach(&self) {
@@ -676,6 +678,61 @@ fn wait_until_parsed(object: *mut GstObject) {
             last_change = std::time::Instant::now();
         } else if last_change.elapsed() >= SETTLED {
             return;
+        }
+    }
+}
+
+/// The start of `struct _GstMseSrc` (`gstmsesrc.c`, private; the same from 1.24 to main in
+/// 2026-10).
+#[repr(C)]
+struct GstMseSrcStart {
+    base: gstreamer::ffi::GstElement,
+    media_source: *mut GstObject,
+    media_source_lock: glib::ffi::GMutex,
+    group_id: std::ffi::c_uint,
+    collection: *mut std::ffi::c_void,
+    streams: *mut std::ffi::c_void,
+    streams_lock: glib::ffi::GMutex,
+    duration: GstClockTime,
+    start_time: GstClockTime,
+    rate: f64,
+    ready_state: c_int,
+}
+
+/// Sets the ready state of a newly attached `msesrc` to HAVE_METADATA, so that
+/// `update_ready_state_for_init_segment()` returns at once and never takes the media source lock
+/// it forgets to release (see `SourceBuffer::object`): then every source buffer goes to gstmse at
+/// once and `msesrc` gets the streams close together (a stream added later was left out by
+/// decodebin3: no picture). msesrc reads its ready state only for the property and error texts.
+/// Only when the private structure is laid out as expected (checked on the values a new msesrc
+/// has).
+///
+/// # Safety
+/// `element` must be the `msesrc` that `media_source` was just attached to.
+unsafe fn start_at_metadata(element: &gstreamer::Element, media_source: *mut GstObject) {
+    // SAFETY: the reads stay inside the instance (checked against the size of its type).
+    unsafe {
+        let instance = element.as_ptr() as *mut glib::gobject_ffi::GTypeInstance;
+        let mut query: glib::gobject_ffi::GTypeQuery = std::mem::zeroed();
+        glib::gobject_ffi::g_type_query((*(*instance).g_class).g_type, &mut query);
+        if query.type_name.is_null() ||
+            std::ffi::CStr::from_ptr(query.type_name).to_bytes() != b"GstMseSrc" ||
+            (query.instance_size as usize) < std::mem::size_of::<GstMseSrcStart>()
+        {
+            return;
+        }
+        let start = element.as_ptr() as *mut GstMseSrcStart;
+        let lock = &mut (*start).media_source_lock as *mut glib::ffi::GMutex;
+        glib::ffi::g_mutex_lock(lock);
+        let laid_out_as_expected = (*start).media_source == media_source &&
+            (*start).rate == 1. &&
+            (*start).ready_state == 0;
+        if laid_out_as_expected {
+            (*start).ready_state = GST_MSE_SRC_READY_STATE_HAVE_METADATA;
+        }
+        glib::ffi::g_mutex_unlock(lock);
+        if !laid_out_as_expected {
+            log::warn!("MSE: msesrc has another layout; source buffers reach gstmse one by one");
         }
     }
 }
