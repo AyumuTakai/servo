@@ -82,6 +82,11 @@ pub(crate) struct OneshotTimers {
     js_timers: JsTimers,
     next_timer_handle: Cell<OneshotTimerHandle>,
     timers: DomRefCell<VecDeque<OneshotTimer>>,
+    /// Timers taken out of `timers` by `fire_timer` that are due but have not run yet, in the order
+    /// they run. They have to stay in a traced field: running the callback of one timer can trigger
+    /// a garbage collection, and the callbacks of the timers still waiting would be freed if they
+    /// were only held by a local variable (a use-after-free in `GetNonCCWObjectGlobal`).
+    timers_firing: DomRefCell<VecDeque<OneshotTimer>>,
     suspended_since: Cell<Option<Instant>>,
     /// Initially 0, increased whenever the associated document is reactivated
     /// by the amount of ms the document was inactive. The current time can be
@@ -196,6 +201,7 @@ impl OneshotTimers {
             js_timers: JsTimers::default(),
             next_timer_handle: Cell::new(OneshotTimerHandle(1)),
             timers: DomRefCell::new(VecDeque::new()),
+            timers_firing: DomRefCell::new(VecDeque::new()),
             suspended_since: Cell::new(None),
             suspension_offset: Cell::new(Duration::ZERO),
             expected_event_id: Cell::new(TimerEventId(0)),
@@ -348,8 +354,7 @@ impl OneshotTimers {
 
         // select timers to run to prevent firing timers
         // that were installed during fire of another timer
-        let mut timers_to_run = Vec::new();
-
+        // (kept in a traced field, not a local variable: see `timers_firing`)
         loop {
             let mut timers = self.timers.borrow_mut();
 
@@ -357,10 +362,15 @@ impl OneshotTimers {
                 break;
             }
 
-            timers_to_run.push(timers.pop_back().unwrap());
+            self.timers_firing
+                .borrow_mut()
+                .push_back(timers.pop_back().unwrap());
         }
 
-        for timer in timers_to_run {
+        loop {
+            let Some(timer) = self.timers_firing.borrow_mut().pop_front() else {
+                break;
+            };
             // Since timers can be coalesced together inside a task,
             // this loop can keep running, including after an interrupt of the JS,
             // and prevent a clean-shutdown of a JS-running thread.
