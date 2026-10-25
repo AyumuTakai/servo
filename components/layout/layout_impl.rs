@@ -1729,6 +1729,11 @@ impl LayoutThread {
         })
     }
 
+    /// The current fragment tree (for layout queries that look for the fragments of a node in it).
+    pub(crate) fn current_fragment_tree(&self) -> Option<Rc<FragmentTree>> {
+        self.fragment_tree.borrow().clone()
+    }
+
     pub(crate) fn ensure_containing_block_calculation(&self) {
         if !self.need_containing_block_calculation.get() {
             return;
