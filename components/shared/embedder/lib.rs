@@ -716,6 +716,17 @@ pub struct WebResourceRequest {
     pub referrer_url: Option<Url>,
     pub is_for_main_frame: bool,
     pub is_redirect: bool,
+    /// The request body, read in full. Only filled for requests to the host named by the
+    /// `network_intercept_body_host` preference (an embedder that serves that host itself, e.g.
+    /// from an in-process server, needs POST/PUT bodies) that come from a document of that same
+    /// origin; `None` otherwise.
+    #[serde(default)]
+    pub body: Option<Vec<u8>>,
+    /// The origin of the document (or worker) that made the request (its ASCII serialization;
+    /// `null` for an opaque origin, such as a sandboxed iframe or a `data:` URL). `None` when the
+    /// request has no such origin (for example, a navigation that the embedder started).
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
