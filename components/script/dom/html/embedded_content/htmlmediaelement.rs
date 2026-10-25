@@ -869,6 +869,18 @@ impl HTMLMediaElement {
     }
 
     /// <https://html.spec.whatwg.org/multipage/#time-marches-on>
+    /// Step 6 of the time marches on steps: fire timeupdate, at most every 250ms, during normal
+    /// playback.
+    fn queue_timeupdate_if_due(&self, playback_was_moved_monotonic_increase: bool) {
+        if playback_was_moved_monotonic_increase &&
+            Instant::now() > self.next_timeupdate_event.get()
+        {
+            self.queue_media_element_task_to_fire_event(atom!("timeupdate"));
+            self.next_timeupdate_event
+                .set(Instant::now() + Duration::from_millis(250));
+        }
+    }
+
     fn time_marches_on(&self, cx: &mut JSContext, playback_was_moved: PlaybackPositionWasMoved) {
         let playback_was_moved_monotonic_increase =
             playback_was_moved == PlaybackPositionWasMoved::NormalPlayback;
@@ -880,13 +892,22 @@ impl HTMLMediaElement {
         // Step 2. Let other cues be a list of cues, initialized to contain
         // all the cues of hidden and showing text tracks of the media element
         // that are not present in current cues.
-        let Some(text_tracks_list) = self.text_tracks_list.get() else {
+        // Without text tracks (the list is made when the page reads `textTracks`), there are no
+        // cues: only step 6 (timeupdate) applies. Returning here made a media element of a page
+        // that never reads `textTracks` fire no timeupdate during playback (YouTube waits for
+        // them to fetch the next segments).
+        let text_tracks_list = self.text_tracks_list.get();
+        let cues = text_tracks_list
+            .as_ref()
+            .and_then(|text_tracks_list| self.current_and_other_cues(cx.no_gc(), text_tracks_list));
+        let Some((current_cues, other_cues)) = cues else {
+            self.position_when_time_marches_on_ran
+                .set(Some(self.current_playback_position.get()));
+            self.queue_timeupdate_if_due(playback_was_moved_monotonic_increase);
             return;
         };
-        let Some((current_cues, other_cues)) =
-            self.current_and_other_cues(cx.no_gc(), &text_tracks_list)
-        else {
-            return;
+        let Some(text_tracks_list) = text_tracks_list.as_ref() else {
+            unreachable!("the cues come from the text track list");
         };
         // Step 3. Let last time be the current playback position at the time
         // this algorithm was last run for this media element,
@@ -936,13 +957,7 @@ impl HTMLMediaElement {
         // timeupdate event at the element in the past 15 to 250ms and is not still running event
         // handlers for such an event, then the user agent must queue a media element task given the
         // media element to fire an event named timeupdate at the element.
-        if playback_was_moved_monotonic_increase &&
-            Instant::now() > self.next_timeupdate_event.get()
-        {
-            self.queue_media_element_task_to_fire_event(atom!("timeupdate"));
-            self.next_timeupdate_event
-                .set(Instant::now() + Duration::from_millis(250));
-        }
+        self.queue_timeupdate_if_due(playback_was_moved_monotonic_increase);
 
         // Step 7. If all of the cues in current cues have their text track cue active flag set,
         // none of the cues in other cues have their text track cue active flag set,
