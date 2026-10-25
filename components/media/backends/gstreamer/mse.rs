@@ -40,83 +40,206 @@ struct GstMediaSourceRange {
     end: GstClockTime,
 }
 
-#[link(name = "kyousei-mse-1.0")]
-unsafe extern "C" {
-    fn ky_mse_register() -> glib::ffi::gboolean;
-    fn ky_media_source_get_type() -> glib::ffi::GType;
-    fn ky_media_source_error_quark() -> glib::ffi::GQuark;
-    fn ky_source_buffer_get_type() -> glib::ffi::GType;
-    fn ky_media_source_new() -> *mut GstObject;
-    fn ky_media_source_is_type_supported(type_: *const c_char) -> glib::ffi::gboolean;
-    fn ky_media_source_attach(
+/// The ABI version of `libkyousei-mse` this code is written for (`KY_MSE_ABI_VERSION`).
+const ABI_VERSION: std::ffi::c_uint = 1;
+
+/// The functions of `libkyousei-mse-1.0`, found at run time: the library ships with Kyousei OS
+/// (next to the executable, in `../lib/`), and a machine without it plays no MSE (see
+/// `is_available()`).
+struct Api {
+    ky_mse_abi_version: unsafe extern "C" fn() -> std::ffi::c_uint,
+    ky_mse_register: unsafe extern "C" fn() -> glib::ffi::gboolean,
+    ky_media_source_get_type: unsafe extern "C" fn() -> glib::ffi::GType,
+    ky_media_source_error_quark: unsafe extern "C" fn() -> glib::ffi::GQuark,
+    ky_source_buffer_get_type: unsafe extern "C" fn() -> glib::ffi::GType,
+    ky_media_source_new: unsafe extern "C" fn() -> *mut GstObject,
+    ky_media_source_is_type_supported:
+        unsafe extern "C" fn(type_: *const c_char) -> glib::ffi::gboolean,
+    ky_media_source_attach: unsafe extern "C" fn(
         media_source: *mut GstObject,
         element: *mut gstreamer::ffi::GstElement,
-    );
-    fn ky_media_source_detach(media_source: *mut GstObject);
-    fn ky_media_source_add_source_buffer(
+    ),
+    ky_media_source_detach: unsafe extern "C" fn(media_source: *mut GstObject),
+    ky_media_source_add_source_buffer: unsafe extern "C" fn(
         media_source: *mut GstObject,
         type_: *const c_char,
         error: *mut *mut GError,
-    ) -> *mut GstObject;
-    fn ky_media_source_remove_source_buffer(
+    ) -> *mut GstObject,
+    ky_media_source_remove_source_buffer: unsafe extern "C" fn(
         media_source: *mut GstObject,
         buffer: *mut GstObject,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_media_source_set_duration(
+    ) -> glib::ffi::gboolean,
+    ky_media_source_set_duration: unsafe extern "C" fn(
         media_source: *mut GstObject,
         duration: GstClockTime,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_media_source_end_of_stream(
+    ) -> glib::ffi::gboolean,
+    ky_media_source_end_of_stream: unsafe extern "C" fn(
         media_source: *mut GstObject,
         eos_error: c_int,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_source_buffer_append_buffer(
+    ) -> glib::ffi::gboolean,
+    ky_source_buffer_append_buffer: unsafe extern "C" fn(
         buffer: *mut GstObject,
         buf: *mut gstreamer::ffi::GstBuffer,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_source_buffer_abort(
+    ) -> glib::ffi::gboolean,
+    ky_source_buffer_abort: unsafe extern "C" fn(
         buffer: *mut GstObject,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_source_buffer_remove(
+    ) -> glib::ffi::gboolean,
+    ky_source_buffer_remove: unsafe extern "C" fn(
         buffer: *mut GstObject,
         start: GstClockTime,
         end: GstClockTime,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_source_buffer_get_buffered(
+    ) -> glib::ffi::gboolean,
+    ky_source_buffer_get_buffered: unsafe extern "C" fn(
         buffer: *mut GstObject,
         error: *mut *mut GError,
-    ) -> *mut glib::ffi::GArray;
-    fn ky_source_buffer_set_timestamp_offset(
+    ) -> *mut glib::ffi::GArray,
+    ky_source_buffer_set_timestamp_offset: unsafe extern "C" fn(
         buffer: *mut GstObject,
         offset: GstClockTime,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_source_buffer_set_append_window_start(
+    ) -> glib::ffi::gboolean,
+    ky_source_buffer_set_append_window_start: unsafe extern "C" fn(
         buffer: *mut GstObject,
         start: GstClockTime,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_source_buffer_set_append_window_end(
+    ) -> glib::ffi::gboolean,
+    ky_source_buffer_set_append_window_end: unsafe extern "C" fn(
         buffer: *mut GstObject,
         end: GstClockTime,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_source_buffer_set_append_mode(
+    ) -> glib::ffi::gboolean,
+    ky_source_buffer_set_append_mode: unsafe extern "C" fn(
         buffer: *mut GstObject,
         mode: c_int,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn ky_source_buffer_change_content_type(
+    ) -> glib::ffi::gboolean,
+    ky_source_buffer_change_content_type: unsafe extern "C" fn(
         buffer: *mut GstObject,
         type_: *const c_char,
         error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
+    ) -> glib::ffi::gboolean,
+}
+
+/// Looks up `name` in the library `handle`.
+///
+/// # Safety
+/// `T` must be the function pointer type of the symbol.
+unsafe fn symbol<T>(handle: *mut std::ffi::c_void, name: &std::ffi::CStr) -> Option<T> {
+    // SAFETY: a valid handle and NUL-terminated name.
+    let address = unsafe { libc::dlsym(handle, name.as_ptr()) };
+    if address.is_null() {
+        log::warn!("MSE: libkyousei-mse has no {name:?}");
+        return None;
+    }
+    // SAFETY: the caller gives the type of the symbol; a function pointer has the size of a
+    // pointer.
+    Some(unsafe { std::mem::transmute_copy::<*mut std::ffi::c_void, T>(&address) })
+}
+
+impl Api {
+    /// Opens the library (`../lib/` next to the executable first, then the usual search
+    /// path) and checks its ABI version.
+    fn load() -> Option<Self> {
+        const NAME: &str = "libkyousei-mse-1.0.so.0";
+        let beside = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.parent()?.join("lib").join(NAME)))
+            .filter(|path| path.exists())
+            .and_then(|path| CString::new(path.into_os_string().into_encoded_bytes()).ok());
+        let candidates = beside.into_iter().chain(CString::new(NAME).ok());
+        let handle = candidates.into_iter().find_map(|path| {
+            // SAFETY: a valid NUL-terminated path.
+            let handle = unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            (!handle.is_null()).then_some(handle)
+        });
+        let Some(handle) = handle else {
+            log::info!("MSE: {NAME} is not installed; MediaSource is off");
+            return None;
+        };
+        // SAFETY: the types are those of the library's header (`kyousei-mse/*.h`).
+        let api = unsafe {
+            Self {
+                ky_mse_abi_version: symbol(handle, c"ky_mse_abi_version")?,
+                ky_mse_register: symbol(handle, c"ky_mse_register")?,
+                ky_media_source_get_type: symbol(handle, c"ky_media_source_get_type")?,
+                ky_media_source_error_quark: symbol(handle, c"ky_media_source_error_quark")?,
+                ky_source_buffer_get_type: symbol(handle, c"ky_source_buffer_get_type")?,
+                ky_media_source_new: symbol(handle, c"ky_media_source_new")?,
+                ky_media_source_is_type_supported: symbol(
+                    handle,
+                    c"ky_media_source_is_type_supported",
+                )?,
+                ky_media_source_attach: symbol(handle, c"ky_media_source_attach")?,
+                ky_media_source_detach: symbol(handle, c"ky_media_source_detach")?,
+                ky_media_source_add_source_buffer: symbol(
+                    handle,
+                    c"ky_media_source_add_source_buffer",
+                )?,
+                ky_media_source_remove_source_buffer: symbol(
+                    handle,
+                    c"ky_media_source_remove_source_buffer",
+                )?,
+                ky_media_source_set_duration: symbol(handle, c"ky_media_source_set_duration")?,
+                ky_media_source_end_of_stream: symbol(handle, c"ky_media_source_end_of_stream")?,
+                ky_source_buffer_append_buffer: symbol(handle, c"ky_source_buffer_append_buffer")?,
+                ky_source_buffer_abort: symbol(handle, c"ky_source_buffer_abort")?,
+                ky_source_buffer_remove: symbol(handle, c"ky_source_buffer_remove")?,
+                ky_source_buffer_get_buffered: symbol(handle, c"ky_source_buffer_get_buffered")?,
+                ky_source_buffer_set_timestamp_offset: symbol(
+                    handle,
+                    c"ky_source_buffer_set_timestamp_offset",
+                )?,
+                ky_source_buffer_set_append_window_start: symbol(
+                    handle,
+                    c"ky_source_buffer_set_append_window_start",
+                )?,
+                ky_source_buffer_set_append_window_end: symbol(
+                    handle,
+                    c"ky_source_buffer_set_append_window_end",
+                )?,
+                ky_source_buffer_set_append_mode: symbol(
+                    handle,
+                    c"ky_source_buffer_set_append_mode",
+                )?,
+                ky_source_buffer_change_content_type: symbol(
+                    handle,
+                    c"ky_source_buffer_change_content_type",
+                )?,
+            }
+        };
+        // SAFETY: a function of the library, without arguments.
+        let version = unsafe { (api.ky_mse_abi_version)() };
+        if version != ABI_VERSION {
+            log::warn!(
+                "MSE: libkyousei-mse has ABI {version}, {ABI_VERSION} is needed; MediaSource is off"
+            );
+            return None;
+        }
+        Some(api)
+    }
+}
+
+/// The library, when it is installed and of the right version.
+fn try_api() -> Option<&'static Api> {
+    static API: std::sync::OnceLock<Option<Api>> = std::sync::OnceLock::new();
+    API.get_or_init(Api::load).as_ref()
+}
+
+/// The library. Only reached when MediaSource is on, which needs the library (`is_available()`).
+fn api() -> &'static Api {
+    try_api().expect("MediaSource is used without libkyousei-mse")
+}
+
+/// Whether MediaSource can work: `libkyousei-mse` is installed and of the right version. Servo
+/// turns MediaSource off when it is not.
+pub fn is_available() -> bool {
+    try_api().is_some()
 }
 
 /// Takes the reference a gstmse constructor returned (sinking it when it is floating).
@@ -142,7 +265,7 @@ fn check(call: impl FnOnce(*mut *mut GError) -> glib::ffi::gboolean) -> Result<(
     // SAFETY: a failed call set `error` (or left it NULL).
     if !error.is_null() &&
         unsafe {
-            (*error).domain == ky_media_source_error_quark() &&
+            (*error).domain == (api().ky_media_source_error_quark)() &&
                 (*error).code == GST_MEDIA_SOURCE_ERROR_QUOTA_EXCEEDED
         }
     {
@@ -181,7 +304,7 @@ fn register() {
     static REGISTER: std::sync::Once = std::sync::Once::new();
     // SAFETY: called after gst_init() (the backend initializes GStreamer first).
     REGISTER.call_once(|| {
-        if unsafe { ky_mse_register() } == glib::ffi::GFALSE {
+        if unsafe { (api().ky_mse_register)() } == glib::ffi::GFALSE {
             log::warn!("MSE: could not register kyouseimsesrc");
         }
     });
@@ -192,9 +315,12 @@ pub fn is_type_supported(mime_type: &str) -> bool {
     let Ok(mime_type) = CString::new(mime_type) else {
         return false;
     };
+    if !is_available() {
+        return false;
+    }
     register();
     // SAFETY: a valid NUL-terminated string.
-    unsafe { ky_media_source_is_type_supported(mime_type.as_ptr()) != glib::ffi::GFALSE }
+    unsafe { (api().ky_media_source_is_type_supported)(mime_type.as_ptr()) != glib::ffi::GFALSE }
 }
 
 /// The state the signal handlers of a gstmse source buffer share with us.
@@ -225,9 +351,9 @@ impl MediaSource {
         register();
         // SAFETY: the constructor returns a new reference.
         let object = unsafe {
-            let _ = ky_media_source_get_type();
-            let _ = ky_source_buffer_get_type();
-            take_object(ky_media_source_new())
+            let _ = (api().ky_media_source_get_type)();
+            let _ = (api().ky_source_buffer_get_type)();
+            take_object((api().ky_media_source_new)())
         };
         let observer_ = observer.clone();
         object.connect("on-source-open", false, move |_| {
@@ -250,12 +376,12 @@ impl MediaSource {
     /// `kyousei-mse://`.
     pub fn attach(&self, element: &gstreamer::Element) {
         // SAFETY: both objects are alive; the library checks the type of the element.
-        unsafe { ky_media_source_attach(self.ptr(), element.as_ptr()) }
+        unsafe { (api().ky_media_source_attach)(self.ptr(), element.as_ptr()) }
     }
 
     pub fn detach(&self) {
         // SAFETY: the object is alive.
-        unsafe { ky_media_source_detach(self.ptr()) }
+        unsafe { (api().ky_media_source_detach)(self.ptr()) }
     }
 
     pub fn add_source_buffer(&self, mime_type: &str) -> Result<usize, PlayerError> {
@@ -269,7 +395,7 @@ impl MediaSource {
         let mut error: *mut GError = ptr::null_mut();
         // SAFETY: valid arguments; the result is a new reference or NULL with `error` set.
         let object = unsafe {
-            ky_media_source_add_source_buffer(self.ptr(), mime_type.as_ptr(), &mut error)
+            (api().ky_media_source_add_source_buffer)(self.ptr(), mime_type.as_ptr(), &mut error)
         };
         if object.is_null() {
             return Err(PlayerError::MediaSource(error_message(error)));
@@ -332,13 +458,15 @@ impl MediaSource {
         };
         let object = buffer.object.as_ptr() as *mut GstObject;
         // SAFETY: both objects are alive.
-        check(|error| unsafe { ky_media_source_remove_source_buffer(self.ptr(), object, error) })
+        check(|error| unsafe {
+            (api().ky_media_source_remove_source_buffer)(self.ptr(), object, error)
+        })
     }
 
     pub fn set_duration(&self, duration: f64) -> Result<(), PlayerError> {
         let duration = clock_time(duration);
         // SAFETY: the object is alive.
-        check(|error| unsafe { ky_media_source_set_duration(self.ptr(), duration, error) })
+        check(|error| unsafe { (api().ky_media_source_set_duration)(self.ptr(), duration, error) })
     }
 
     pub fn end_of_stream(&self, error: MediaSourceEndOfStreamError) -> Result<(), PlayerError> {
@@ -348,7 +476,9 @@ impl MediaSource {
             MediaSourceEndOfStreamError::Decode => GST_MEDIA_SOURCE_EOS_ERROR_DECODE,
         };
         // SAFETY: the object is alive.
-        check(|error| unsafe { ky_media_source_end_of_stream(self.ptr(), eos_error, error) })
+        check(|error| unsafe {
+            (api().ky_media_source_end_of_stream)(self.ptr(), eos_error, error)
+        })
     }
 
     pub fn append(&self, id: usize, data: Vec<u8>) -> Result<(), PlayerError> {
@@ -362,7 +492,7 @@ impl MediaSource {
         let object = buffer.object.as_ptr() as *mut GstObject;
         // SAFETY: `append_buffer` takes the ownership of the buffer (transfer full).
         let result = check(|error| unsafe {
-            ky_source_buffer_append_buffer(object, data.into_glib_ptr(), error)
+            (api().ky_source_buffer_append_buffer)(object, data.into_glib_ptr(), error)
         });
         if result.is_err() {
             state.outstanding.store(false, Ordering::SeqCst);
@@ -373,7 +503,7 @@ impl MediaSource {
     pub fn abort(&self, id: usize) -> Result<(), PlayerError> {
         // SAFETY: the object is alive.
         self.with_buffer(id, |object| {
-            check(|error| unsafe { ky_source_buffer_abort(object, error) })
+            check(|error| unsafe { (api().ky_source_buffer_abort)(object, error) })
         })
     }
 
@@ -381,7 +511,7 @@ impl MediaSource {
         let (start, end) = (clock_time(start), clock_time(end));
         // SAFETY: the object is alive.
         self.with_buffer(id, |object| {
-            check(|error| unsafe { ky_source_buffer_remove(object, start, end, error) })
+            check(|error| unsafe { (api().ky_source_buffer_remove)(object, start, end, error) })
         })
     }
 
@@ -406,7 +536,9 @@ impl MediaSource {
         let offset = clock_time(offset);
         // SAFETY: the object is alive.
         self.with_buffer(id, |object| {
-            check(|error| unsafe { ky_source_buffer_set_timestamp_offset(object, offset, error) })
+            check(|error| unsafe {
+                (api().ky_source_buffer_set_timestamp_offset)(object, offset, error)
+            })
         })
     }
 
@@ -418,11 +550,13 @@ impl MediaSource {
         self.with_buffer(id, |object| {
             let set_start = || {
                 check(|error| unsafe {
-                    ky_source_buffer_set_append_window_start(object, start, error)
+                    (api().ky_source_buffer_set_append_window_start)(object, start, error)
                 })
             };
             let set_end = || {
-                check(|error| unsafe { ky_source_buffer_set_append_window_end(object, end, error) })
+                check(|error| unsafe {
+                    (api().ky_source_buffer_set_append_window_end)(object, end, error)
+                })
             };
             if set_start().is_ok() {
                 set_end()
@@ -441,7 +575,7 @@ impl MediaSource {
         };
         // SAFETY: the object is alive.
         self.with_buffer(id, |object| {
-            check(|error| unsafe { ky_source_buffer_set_append_mode(object, mode, error) })
+            check(|error| unsafe { (api().ky_source_buffer_set_append_mode)(object, mode, error) })
         })
     }
 
@@ -453,7 +587,7 @@ impl MediaSource {
         // SAFETY: the object is alive; a valid NUL-terminated string.
         self.with_buffer(id, |object| {
             check(|error| unsafe {
-                ky_source_buffer_change_content_type(object, mime_type.as_ptr(), error)
+                (api().ky_source_buffer_change_content_type)(object, mime_type.as_ptr(), error)
             })
         })
     }
@@ -470,7 +604,7 @@ impl Drop for MediaSource {
 fn buffered_of(object: *mut GstObject) -> Result<Vec<Range<f64>>, PlayerError> {
     let mut error: *mut GError = ptr::null_mut();
     // SAFETY: the result is a new GArray of `GstMediaSourceRange`, or NULL.
-    let array = unsafe { ky_source_buffer_get_buffered(object, &mut error) };
+    let array = unsafe { (api().ky_source_buffer_get_buffered)(object, &mut error) };
     if array.is_null() {
         return Err(PlayerError::MediaSource(error_message(error)));
     }
