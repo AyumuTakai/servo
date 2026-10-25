@@ -1356,45 +1356,7 @@ impl Fragment {
             return;
         }
 
-        let mut current_character_index = fragment.character_range_in_dom_node.start;
-        let mut current_advance = Au::zero();
-        let mut start_advance = None;
-        let mut end_advance = None;
-        for glyph_store in fragment.glyphs.iter() {
-            let glyph_store_character_count = glyph_store.character_count();
-            if current_character_index + glyph_store_character_count <
-                selection_character_range.start
-            {
-                current_advance += glyph_store.total_advance() +
-                    (fragment.justification_adjustment *
-                        glyph_store.total_word_separators() as i32);
-                current_character_index += glyph_store_character_count;
-                continue;
-            }
-
-            if current_character_index >= selection_character_range.end {
-                break;
-            }
-
-            for glyph in glyph_store.glyphs() {
-                if current_character_index >= selection_character_range.start {
-                    start_advance = start_advance.or(Some(current_advance));
-                }
-
-                current_character_index += glyph.character_count();
-                current_advance += glyph.advance();
-                if glyph.char_is_word_separator() {
-                    current_advance += fragment.justification_adjustment;
-                }
-
-                if current_character_index <= selection_character_range.end {
-                    end_advance = Some(current_advance);
-                }
-            }
-        }
-
-        let start_x = start_advance.unwrap_or(current_advance);
-        let end_x = end_advance.unwrap_or(current_advance);
+        let (start_x, end_x) = fragment.advances_of_character_range(&selection_character_range);
 
         let fragment_rect = fragment.base.rect();
         let fragment_origin =

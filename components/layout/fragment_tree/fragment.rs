@@ -112,6 +112,55 @@ pub(crate) struct TextFragment {
     pub is_empty_for_text_cursor: bool,
 }
 
+impl TextFragment {
+    /// The inline offsets, from the start of this fragment, of the start and of the end of the
+    /// given range of characters (in the same coordinates as `character_range_in_dom_node`). A range
+    /// that starts or ends outside of this fragment is clamped to the fragment.
+    pub(crate) fn advances_of_character_range(
+        &self,
+        range: &Range<Utf32CodeUnits>,
+    ) -> (Au, Au) {
+        let mut current_character_index = self.character_range_in_dom_node.start;
+        let mut current_advance = Au::zero();
+        let mut start_advance = None;
+        let mut end_advance = None;
+        for glyph_store in self.glyphs.iter() {
+            let glyph_store_character_count = glyph_store.character_count();
+            if current_character_index + glyph_store_character_count < range.start {
+                current_advance += glyph_store.total_advance() +
+                    (self.justification_adjustment * glyph_store.total_word_separators() as i32);
+                current_character_index += glyph_store_character_count;
+                continue;
+            }
+
+            if current_character_index >= range.end {
+                break;
+            }
+
+            for glyph in glyph_store.glyphs() {
+                if current_character_index >= range.start {
+                    start_advance = start_advance.or(Some(current_advance));
+                }
+
+                current_character_index += glyph.character_count();
+                current_advance += glyph.advance();
+                if glyph.char_is_word_separator() {
+                    current_advance += self.justification_adjustment;
+                }
+
+                if current_character_index <= range.end {
+                    end_advance = Some(current_advance);
+                }
+            }
+        }
+
+        (
+            start_advance.unwrap_or(current_advance),
+            end_advance.unwrap_or(current_advance),
+        )
+    }
+}
+
 #[derive(MallocSizeOf)]
 pub(crate) struct ImageFragment {
     pub base: BaseFragment,

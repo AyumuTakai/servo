@@ -47,7 +47,7 @@ use script_traits::{DrawAPaintImageResult, PaintWorkletError, Painter, ScriptThr
 use servo_arc::Arc as ServoArc;
 use servo_base::Epoch;
 use servo_base::id::{PipelineId, WebViewId};
-use servo_base::text::Utf32CodeUnits;
+use servo_base::text::{RangeAny, Utf32CodeUnits};
 use servo_config::opts::{self, DiagnosticsLogging, DiagnosticsLoggingOption};
 use servo_config::pref;
 use servo_url::ServoUrl;
@@ -90,6 +90,7 @@ use crate::dom::NodeExt;
 use crate::query::{
     BoxAreaInclusion, find_character_offset_in_fragment_descendants, get_the_text_steps,
     process_box_area_request, process_box_areas_request, process_client_rect_request,
+    process_text_box_areas_request,
     process_containing_block_descendant_query, process_containing_block_query,
     process_current_css_zoom_query, process_effective_overflow_query,
     process_node_scroll_area_request, process_offset_parent_query, process_padding_request,
@@ -448,6 +449,28 @@ impl Layout for LayoutThread {
                 stacking_context_tree,
                 node,
                 area,
+            ))
+        })
+        .unwrap_or_default()
+    }
+
+    #[servo_tracing::instrument(skip_all)]
+    fn query_text_range_areas(
+        &self,
+        node: TrustedNodeAddress,
+        range: RangeAny<Utf32CodeUnits>,
+    ) -> CSSPixelRectVec {
+        with_layout_state(|| {
+            let fragment_tree = self.fragment_tree.borrow();
+            let fragment_tree = fragment_tree.as_ref()?;
+            let node = unsafe { ServoLayoutNode::new(&node) };
+            let stacking_context_tree = self.stacking_context_tree.borrow();
+            let stacking_context_tree = stacking_context_tree.as_ref()?;
+            Some(process_text_box_areas_request(
+                fragment_tree,
+                stacking_context_tree,
+                node,
+                range,
             ))
         })
         .unwrap_or_default()
@@ -2031,6 +2054,7 @@ impl ReflowPhases {
                 },
                 QueryMsg::BoxArea |
                 QueryMsg::BoxAreas |
+                QueryMsg::TextRangeAreas |
                 QueryMsg::ElementsFromPoint |
                 QueryMsg::FlushForUpdateTheRenderingQuery |
                 QueryMsg::OffsetParentQuery |
