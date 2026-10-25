@@ -281,6 +281,26 @@ impl<'dom> LayoutDom<'dom, Node> {
         Some(RangeAny::new(start, end))
     }
 
+    /// For an element that holds the caret of a collapsed document selection between its children
+    /// (such as an editing host whose caret is before, between or after inline boxes): the number of
+    /// children before the caret. Layout puts an empty text run there, to paint the caret on.
+    #[expect(unsafe_code)]
+    pub(crate) fn caret_child_offset(&self) -> Option<usize> {
+        let unsafe_self = self.unsafe_get();
+        if !unsafe_self.get_flag(NodeFlags::PAINTS_DOCUMENT_CARET) ||
+            self.downcast::<Element>().is_none()
+        {
+            return None;
+        }
+        let selection = self.owner_doc_for_layout().visible_selection_for_layout()?;
+        let range = selection.range_for_layout();
+        let range = range.as_ref()?;
+        let is_start_node = unsafe { range.start.container.to_layout() } == *self;
+        let is_end_node = unsafe { range.end.container.to_layout() } == *self;
+        (is_start_node && is_end_node && range.start.offset == range.end.offset)
+            .then_some(range.start.offset as usize)
+    }
+
     pub(crate) fn text_node_paints_caret(&self) -> bool {
         if let Some(shadow_root) = self.containing_shadow_root_for_layout() {
             let host = shadow_root.get_host_for_layout();

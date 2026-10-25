@@ -179,6 +179,10 @@ pub trait LayoutNode<'dom>: Copy + Debug + NodeInfo + Send + Sync {
     /// (start == end)
     fn text_node_paints_caret(&self) -> bool;
 
+    /// For an element that holds the caret of a collapsed document selection between its children:
+    /// the number of children before the caret.
+    fn caret_child_offset(&self) -> Option<usize>;
+
     /// If this is an image element, returns its URL. If this is not an image element, fails.
     fn image_url(&self) -> Option<ServoUrl>;
 

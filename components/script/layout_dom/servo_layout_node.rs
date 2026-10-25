@@ -256,6 +256,10 @@ impl<'dom> LayoutNode<'dom> for ServoLayoutNode<'dom> {
         self.node.text_node_paints_caret()
     }
 
+    fn caret_child_offset(&self) -> Option<usize> {
+        self.node.caret_child_offset()
+    }
+
     fn replaced_is_selected(&self) -> bool {
         self.node.replaced_is_selected()
     }

@@ -1697,6 +1697,32 @@ impl InlineFormattingContextLayout<'_> {
         ));
     }
 
+    /// Push an empty [`LineItem::TextRun`] right here, in the middle of the line, to paint the caret of
+    /// the document selection on: the caret is between two inline boxes (or before the first, or after the
+    /// last) of an editing host, where there is no text to put it on.
+    fn push_empty_text_run_for_caret_here(&mut self, caret_placeholder: CaretPlaceholder) {
+        let Some(font) = self
+            .current_inline_container_state()
+            .default_font
+            .clone()
+        else {
+            return;
+        };
+        self.push_line_item_to_unbreakable_segment(LineItem::TextRun(
+            self.current_inline_box_identifier(),
+            TextRunLineItem {
+                text: Default::default(),
+                text_fragment_run_data: caret_placeholder.run_data,
+                base_fragment_info: caret_placeholder.base_fragment_info,
+                info: FontAndScriptInfo::simple_for_font(font),
+                character_range_in_dom_node: caret_placeholder.character_index..
+                    caret_placeholder.character_index + Utf32CodeUnits(1),
+                is_empty_for_text_cursor: true,
+            },
+        ));
+        self.current_line_segment.has_content = true;
+    }
+
     /// If the current line is empty and this [`InlineFormattingContext`] has a selection, push an
     /// empty [`LineItem::TextRun`] so that text carets can be placed on otherwise empty lines.
     fn possibly_push_empty_text_run_to_line_for_text_caret(&mut self) {

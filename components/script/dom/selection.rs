@@ -1770,7 +1770,13 @@ impl<'no_gc> VisibleSelectionFlagUpdate<'no_gc> {
                     &**flat_tree_selection.end.container,
                 )
             {
-                update.set(&flat_tree_selection.start.container, flat_tree_selection);
+                let container = &flat_tree_selection.start.container;
+                update.set(container, flat_tree_selection);
+                // A caret between the children of an element has no text to be painted on: layout puts an empty text
+                // run at that place, so the element is laid out again when the caret moves.
+                if container.is::<Element>() && container.is_editable_or_editing_host() {
+                    container.dirty(no_gc, NodeDamage::ContentOrHeritage);
+                }
             }
         }
 
