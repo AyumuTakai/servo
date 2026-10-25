@@ -333,6 +333,12 @@ impl Promise {
     }
 
     pub(crate) fn reject_error(&self, cx: &mut JSContext, error: Error) {
+        if matches!(error, Error::InvalidState(_)) {
+            log::warn!(
+                "[kyousei-debug] InvalidState rejection\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         let mut realm = enter_auto_realm(cx, self);
         let cx = &mut realm.current_realm();
         rooted!(&in(cx) let mut v = UndefinedValue());
