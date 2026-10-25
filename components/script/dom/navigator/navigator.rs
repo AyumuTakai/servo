@@ -49,6 +49,8 @@ use crate::dom::csp::{GlobalCspReporting, Violation};
 use crate::dom::gamepad::Gamepad;
 use crate::dom::geolocation::Geolocation;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::hostchannel::HostChannel;
+use crate::dom::mediacapabilities::MediaCapabilities;
 use crate::dom::mediadevices::MediaDevices;
 use crate::dom::mediasession::MediaSession;
 use crate::dom::mimetypearray::MimeTypeArray;
@@ -57,7 +59,6 @@ use crate::dom::performance::performanceresourcetiming::InitiatorType;
 use crate::dom::permissions::Permissions;
 use crate::dom::pluginarray::PluginArray;
 use crate::dom::serviceworkercontainer::ServiceWorkerContainer;
-use crate::dom::hostchannel::HostChannel;
 use crate::dom::servointernals::ServoInternals;
 use crate::dom::storagemanager::StorageManager;
 use crate::dom::types::UserActivation;
@@ -127,6 +128,7 @@ pub(crate) struct Navigator {
     #[cfg(feature = "webxr")]
     xr: MutNullableDom<XRSystem>,
     mediadevices: MutNullableDom<MediaDevices>,
+    mediacapabilities: MutNullableDom<MediaCapabilities>,
     /// <https://www.w3.org/TR/gamepad/#dfn-gamepads>
     #[cfg(feature = "gamepad")]
     gamepads: DomRefCell<Vec<MutNullableDom<Gamepad>>>,
@@ -158,6 +160,7 @@ impl Navigator {
             #[cfg(feature = "webxr")]
             xr: Default::default(),
             mediadevices: Default::default(),
+            mediacapabilities: Default::default(),
             #[cfg(feature = "gamepad")]
             gamepads: Default::default(),
             permissions: Default::default(),
@@ -486,6 +489,12 @@ impl NavigatorMethods<crate::DomTypeHolder> for Navigator {
     fn MediaDevices(&self, cx: &mut JSContext) -> DomRoot<MediaDevices> {
         self.mediadevices
             .or_init(|| MediaDevices::new(cx, &self.global()))
+    }
+
+    /// <https://w3c.github.io/media-capabilities/#dom-navigator-mediacapabilities>
+    fn MediaCapabilities(&self, cx: &mut JSContext) -> DomRoot<MediaCapabilities> {
+        self.mediacapabilities
+            .or_init(|| MediaCapabilities::new(cx, &self.global()))
     }
 
     /// <https://w3c.github.io/mediasession/#dom-navigator-mediasession>

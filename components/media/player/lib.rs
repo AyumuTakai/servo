@@ -45,6 +45,13 @@ pub enum PlayerError {
     SetStreamFailed,
     // Setting an audio or video track failed.
     SetTrackFailed,
+    /// The backend has no Media Source Extensions, or the player was not created for a media source.
+    MediaSourceNotSupported,
+    /// A Media Source Extensions operation failed (the message comes from the backend).
+    MediaSource(String),
+    /// The source buffer has no room for the appended data
+    /// (<https://w3c.github.io/media-source/#dfn-buffer-full-flag>).
+    MediaSourceQuotaExceeded,
 }
 
 pub type SeekLockMsg = (bool, GenericSender<()>);
@@ -86,6 +93,24 @@ pub enum PlayerEvent {
     /// The player has performed a seek to the given time offset in seconds.
     SeekDone(f64),
     StateChanged(PlaybackState),
+    /// Media Source Extensions: the media source was attached to the pipeline and
+    /// is ready to accept source buffers.
+    MediaSourceOpen,
+    /// Media Source Extensions: an append or a removal on the source buffer with
+    /// the given id finished. `error` is true when the media segment could not be
+    /// parsed (the append error algorithm).
+    SourceBufferUpdateEnd {
+        id: usize,
+        error: bool,
+    },
+}
+
+/// The error given to `MediaSource.endOfStream()`.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub enum MediaSourceEndOfStreamError {
+    None,
+    Network,
+    Decode,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -94,6 +119,9 @@ pub enum StreamType {
     Stream,
     /// The stream is seekable.
     Seekable,
+    /// The data comes from a `MediaSource` (Media Source Extensions): the page
+    /// appends media segments to source buffers.
+    MediaSource,
 }
 
 pub trait Player: Send + MediaInstance {
@@ -131,4 +159,61 @@ pub trait Player: Send + MediaInstance {
     fn render_use_gl(&self) -> bool;
     fn set_audio_track(&self, stream_index: i32, enabled: bool) -> Result<(), PlayerError>;
     fn set_video_track(&self, stream_index: i32, enabled: bool) -> Result<(), PlayerError>;
+
+    // Media Source Extensions. Only for players created with `StreamType::MediaSource`.
+    // Source buffers are identified by the id `media_source_add_source_buffer` returns.
+    // Appends and removals are asynchronous: they end with `PlayerEvent::SourceBufferUpdateEnd`.
+
+    fn media_source_add_source_buffer(&self, _mime_type: &str) -> Result<usize, PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn media_source_remove_source_buffer(&self, _id: usize) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn media_source_set_duration(&self, _duration: f64) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn media_source_end_of_stream(
+        &self,
+        _error: MediaSourceEndOfStreamError,
+    ) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn source_buffer_append(&self, _id: usize, _data: Vec<u8>) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn source_buffer_abort(&self, _id: usize) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn source_buffer_remove(&self, _id: usize, _start: f64, _end: f64) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn source_buffer_buffered(&self, _id: usize) -> Vec<Range<f64>> {
+        vec![]
+    }
+    fn source_buffer_set_timestamp_offset(
+        &self,
+        _id: usize,
+        _offset: f64,
+    ) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn source_buffer_set_append_window(
+        &self,
+        _id: usize,
+        _start: f64,
+        _end: f64,
+    ) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn source_buffer_set_sequence_mode(
+        &self,
+        _id: usize,
+        _sequence: bool,
+    ) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+    fn source_buffer_change_type(&self, _id: usize, _mime_type: &str) -> Result<(), PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
 }
