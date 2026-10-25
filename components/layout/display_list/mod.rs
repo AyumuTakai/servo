@@ -1683,6 +1683,25 @@ impl<'a> BuilderForBoxFragment<'a> {
                 .wr()
                 .push_rect(&common, bounds, rgba(background_color));
 
+            // WebRender only knows about hit test items. Without one for this box, an `<iframe>`
+            // painted below it would still win hit testing (the iframe's pipeline would be the
+            // first hit), even though this box is painted on top of the iframe. Add a hit test
+            // item for the painted background, so that the hit order follows the paint order.
+            if painter.style.get_inherited_ui().pointer_events !=
+                style::computed_values::pointer_events::T::None
+            {
+                let external_scroll_node_id = builder
+                    .paint_info
+                    .external_scroll_id_for_scroll_tree_node(state.spatial_id);
+                builder.wr().push_hit_test(
+                    common.clip_rect,
+                    common.clip_chain_id,
+                    common.spatial_id,
+                    common.flags,
+                    (external_scroll_node_id.0, 0), /* tag */
+                );
+            }
+
             // From <https://www.w3.org/TR/paint-timing/#sec-terminology>:
             // First paint ... includes non-default background paint and the enclosing box of an iframe.
             // The spec is vague. See also: https://github.com/w3c/paint-timing/issues/122
