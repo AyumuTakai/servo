@@ -249,6 +249,23 @@ fn create_http_states(
     (Arc::new(http_state), Arc::new(private_http_state))
 }
 
+/// Write the cookie jar to `config_dir/cookie_jar.json` (atomically, readable only by its owner).
+/// Writes from the periodic flush and from `Exit` are serialized, so that they never interleave.
+fn save_cookie_jar(state: &HttpState, config_dir: &std::path::Path) {
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let bytes = match servo_base::json_bytes(&*state.cookie_jar.read()) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            warn!("Could not serialize the cookie jar: {error}");
+            return;
+        },
+    };
+    let _guard = WRITING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Err(error) = servo_base::write_file_atomically(config_dir, "cookie_jar.json", &bytes) {
+        warn!("Could not save the cookie jar: {error}");
+    }
+}
+
 impl ResourceChannelManager {
     #[expect(clippy::too_many_arguments)]
     fn start(
@@ -270,17 +287,20 @@ impl ResourceChannelManager {
 
         // The cookie jar is otherwise written only on a clean exit (`CoreResourceMsg::Exit`), which an
         // embedder that is stopped by a signal never reaches: save it periodically when it changed.
+        // Only real changes count (not reading a cookie, which updates its `last_access`), the jar is
+        // serialized under the lock but written after releasing it, and the file is replaced
+        // atomically (`save_cookie_jar`), so that a kill in the middle of a write cannot lose it.
         if let Some(config_dir) = self.config_dir.clone() {
             let state = public_http_state.clone();
             let _ = std::thread::Builder::new()
                 .name("CookieFlush".to_owned())
                 .spawn(move || {
-                    let mut last = String::new();
+                    let mut last = state.cookie_jar.read().content_digest();
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(10));
-                        let now = format!("{:?}", &*state.cookie_jar.read());
+                        let now = state.cookie_jar.read().content_digest();
                         if now != last {
-                            servo_base::write_json_to_file(&*state.cookie_jar.read(), &config_dir, "cookie_jar.json");
+                            save_cookie_jar(&state, &config_dir);
                             last = now;
                         }
                     }
@@ -685,8 +705,7 @@ impl ResourceChannelManager {
                 if let Some(ref config_dir) = self.config_dir {
                     let auth_cache = http_state.auth_cache.read();
                     servo_base::write_json_to_file(&*auth_cache, config_dir, "auth_cache.json");
-                    let jar = http_state.cookie_jar.read();
-                    servo_base::write_json_to_file(&*jar, config_dir, "cookie_jar.json");
+                    save_cookie_jar(&http_state, config_dir);
                     let hsts = http_state.hsts_list.read();
                     servo_base::write_json_to_file(&*hsts, config_dir, "hsts_list.json");
                 }

@@ -230,40 +230,47 @@ impl MediaFrameRenderer {
             let message = message.unwrap();
             let weak_video_renderer = weak_video_renderer.clone();
 
+            // `Lock` and `Unlock` come from the thread that paints (WebRender's external images), which waits
+            // for the answer. Answer them here, on the IPC thread: the frame renderer is shared behind a mutex,
+            // so it does not need the script thread. Going through a script task made painting wait for the
+            // page's JavaScript (up to the painter's timeout, for every frame with a video).
+            let message = match message {
+                GLPlayerMsgForward::Lock(sender) => {
+                    let reply = weak_video_renderer
+                        .upgrade()
+                        .and_then(|renderer| {
+                            let mut renderer = renderer.lock().ok()?;
+                            let holder = renderer.current_frame_holder.as_mut()?;
+                            holder.lock();
+                            Some(holder.get())
+                        })
+                        .unwrap_or((0, Default::default(), 0));
+                    let _ = sender.send(reply);
+                    return;
+                },
+                GLPlayerMsgForward::Unlock() => {
+                    if let Some(renderer) = weak_video_renderer.upgrade() &&
+                        let Ok(mut renderer) = renderer.lock() &&
+                        let Some(holder) = renderer.current_frame_holder.as_mut()
+                    {
+                        holder.unlock();
+                    }
+                    return;
+                },
+                message => message,
+            };
+
             let glplayer_id = glplayer_id.clone();
             task_source.queue(task!(handle_glplayer_message: move || {
                 trace!("GLPlayer message {:?}", message);
 
-                let Some(video_renderer) = weak_video_renderer.upgrade() else {
+                if weak_video_renderer.upgrade().is_none() {
                     return;
-                };
+                }
 
                 match message {
-                    GLPlayerMsgForward::Lock(sender) => {
-                        // Always answer: the painting thread waits for this (it gives up after
-                        // a timeout, and then the receiver is gone, so ignore a failed send).
-                        match video_renderer
-                            .lock()
-                            .unwrap()
-                            .current_frame_holder
-                            .as_mut()
-                        {
-                            Some(holder) => {
-                                holder.lock();
-                                let _ = sender.send(holder.get());
-                            },
-                            None => {
-                                let _ = sender.send((0, Default::default(), 0));
-                            },
-                        }
-                    },
-                    GLPlayerMsgForward::Unlock() => {
-                        if let Some(holder) = video_renderer
-                            .lock()
-                            .unwrap()
-                            .current_frame_holder
-                            .as_mut() { holder.unlock() }
-                    },
+                    // Answered on the IPC thread, above.
+                    GLPlayerMsgForward::Lock(_) | GLPlayerMsgForward::Unlock() => {},
                     GLPlayerMsgForward::PlayerId(id) => {
                         let mut glplayer_id = glplayer_id.write().unwrap();
                         if let Some(already_set_id) = *glplayer_id {

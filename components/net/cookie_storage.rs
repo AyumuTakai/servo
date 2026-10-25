@@ -44,6 +44,33 @@ impl CookieStorage {
         }
     }
 
+    /// A digest of the stored cookies that ignores when they were last read (`last_access`, which
+    /// changes on every read), so that the jar is saved only when its cookies really changed.
+    pub fn content_digest(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut entries: Vec<String> = self
+            .cookies_map
+            .values()
+            .flatten()
+            .map(|c| {
+                format!(
+                    "{}|{:?}|{:?}|{}|{}|{:?}|{:?}",
+                    c.cookie,
+                    c.cookie.domain(),
+                    c.cookie.path(),
+                    c.host_only,
+                    c.persistent,
+                    c.creation_time,
+                    c.expiry_time
+                )
+            })
+            .collect();
+        entries.sort_unstable();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        entries.hash(&mut hasher);
+        hasher.finish()
+    }
+
     // http://tools.ietf.org/html/rfc6265#section-5.3
     pub fn remove(
         &mut self,

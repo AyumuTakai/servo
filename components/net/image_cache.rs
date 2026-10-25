@@ -953,7 +953,8 @@ pub struct ImageCacheImpl {
     last_rasterized: Arc<Mutex<FxHashMap<Uuid, LastRasterized>>>,
     /// The place (a key made from the position in the document) of each SVG element. The last rasterization of a place is
     /// kept in `last_rasterized` under the id of the place, for the next element at that place.
-    svg_places: Arc<Mutex<FxHashMap<Uuid, Uuid>>>,
+    /// With the time each element was last seen (places of elements unseen for `LAST_RASTERIZED_UNUSED` are forgotten).
+    svg_places: Arc<Mutex<FxHashMap<Uuid, (Uuid, Instant)>>>,
     /// The data to use for the broken image icon used when images cannot load.
     broken_image_icon_data: Arc<Vec<u8>>,
     /// Thread pool for image decoding. This is shared with other [`ImageCache`]s in the
@@ -967,7 +968,49 @@ pub struct ImageCacheImpl {
     usvg_font_resolver: Arc<dyn FontResolver>,
 }
 
+/// How long the last rasterization of an SVG element (or place) that is still current is kept after it was last used.
+const LAST_RASTERIZED_UNUSED: Duration = Duration::from_secs(60);
+/// The most pixel memory that `last_rasterized` keeps (the oldest entries go first beyond it).
+const LAST_RASTERIZED_BUDGET: usize = 256 * 1024 * 1024;
+
 impl ImageCacheImpl {
+    /// Drop the kept rasterizations that can no longer be used: an evicted one once WebRender deletes its image
+    /// (`IMAGE_DELETE_DELAY`), a current one when nobody used it for `LAST_RASTERIZED_UNUSED`, then the oldest ones while
+    /// they take more than `LAST_RASTERIZED_BUDGET`. The places of elements not seen for `LAST_RASTERIZED_UNUSED` are
+    /// forgotten too, so that a page that keeps creating SVG elements does not make these maps grow without bound.
+    fn prune_last_rasterized(&self, last: &mut FxHashMap<Uuid, LastRasterized>) {
+        let now = Instant::now();
+        last.retain(|_, entry| match entry.evicted {
+            Some(at) => now.duration_since(at) < IMAGE_DELETE_DELAY,
+            None => now.duration_since(entry.touched) < LAST_RASTERIZED_UNUSED,
+        });
+        // Elements and their places share the pixels (`Arc`): count each buffer once.
+        let mut seen = HashSet::new();
+        let mut total: usize = last
+            .values()
+            .filter(|entry| seen.insert(Arc::as_ptr(&entry.image.bytes)))
+            .map(|entry| entry.image.bytes.len())
+            .sum();
+        if total > LAST_RASTERIZED_BUDGET {
+            let mut by_age: Vec<(Instant, Uuid)> =
+                last.iter().map(|(id, entry)| (entry.touched, *id)).collect();
+            by_age.sort_unstable();
+            for (_, id) in by_age {
+                if total <= LAST_RASTERIZED_BUDGET {
+                    break;
+                }
+                if let Some(entry) = last.remove(&id) &&
+                    Arc::strong_count(&entry.image.bytes) == 1
+                {
+                    total = total.saturating_sub(entry.image.bytes.len());
+                }
+            }
+        }
+        let mut places = self.svg_places.lock();
+        places.retain(|_, (_, seen)| now.duration_since(*seen) < LAST_RASTERIZED_UNUSED);
+
+    }
+
     /// The last image drawn at the place of the SVG element, if it was drawn from the same source at the same size.
     fn reusable_raster(
         &self,
@@ -975,7 +1018,7 @@ impl ImageCacheImpl {
         vector_image: &VectorImageData,
         requested_size: DeviceIntSize,
     ) -> Option<RasterImage> {
-        let place = self.svg_places.lock().get(svg_id).copied()?;
+        let place = self.svg_places.lock().get(svg_id).map(|(place, _)| *place)?;
         let last = self.last_rasterized.lock();
         let entry = last.get(&place)?;
         (entry.content_hash == vector_image.content_hash && entry.size == requested_size)
@@ -1166,8 +1209,12 @@ impl ImageCache for ImageCacheImpl {
             if let Some(svg_id) = svg_id {
                 let now = Instant::now();
                 let mut last = self.last_rasterized.lock();
-                last.retain(|_, entry| now.duration_since(entry.touched) < Duration::from_secs(60));
-                if let Some(place) = self.svg_places.lock().get(&svg_id).copied() {
+                self.prune_last_rasterized(&mut last);
+                let place = self.svg_places.lock().get_mut(&svg_id).map(|(place, seen)| {
+                    *seen = now;
+                    *place
+                });
+                if let Some(place) = place {
                     last.insert(
                         place,
                         LastRasterized {
@@ -1367,20 +1414,22 @@ impl ImageCache for ImageCacheImpl {
             return Some(entry.image.clone());
         }
         // A new element at the place of an element that was removed: show that element's last image.
-        let place = self.svg_places.lock().get(svg_id).copied()?;
+        let place = self.svg_places.lock().get(svg_id).map(|(place, _)| *place)?;
         let entry = last.get(&place)?;
         usable(entry).then(|| entry.image.clone())
     }
 
     fn set_svg_place(&self, svg_id: &Uuid, place: u64) {
-        self.svg_places
-            .lock()
-            .insert(*svg_id, Uuid::from_u64_pair(place, 0x706c_6163_65));
+        self.svg_places.lock().insert(
+            *svg_id,
+            (Uuid::from_u64_pair(place, 0x706c_6163_65), Instant::now()),
+        );
     }
 
     fn evict_rasterized_image(&self, svg_id: &Uuid) {
         {
             let mut last = self.last_rasterized.lock();
+            self.prune_last_rasterized(&mut last);
             let now = Instant::now();
             let mut own_image_id = None;
             if let Some(entry) = last.get_mut(svg_id) {
@@ -1389,7 +1438,11 @@ impl ImageCache for ImageCacheImpl {
                 entry.touched = now;
             }
             // The last image of the place goes the same way, unless a newer element has replaced it already.
-            if let Some(place) = self.svg_places.lock().get(svg_id).copied() &&
+            let place = self.svg_places.lock().get_mut(svg_id).map(|(place, seen)| {
+                *seen = now;
+                *place
+            });
+            if let Some(place) = place &&
                 let Some(entry) = last.get_mut(&place) &&
                 own_image_id == Some(entry.image.id)
             {
