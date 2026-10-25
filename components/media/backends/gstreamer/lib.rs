@@ -11,6 +11,7 @@ mod device_monitor;
 pub mod media_capture;
 pub mod media_stream;
 mod media_stream_source;
+mod mse;
 pub mod player;
 mod registry_scanner;
 mod render;
@@ -308,6 +309,11 @@ impl Backend for GStreamerBackend {
             }
         }
         SupportsMediaType::No
+    }
+
+    fn is_media_source_type_supported(&self, media_type: &str) -> bool {
+        self.can_play_type(media_type) != SupportsMediaType::No
+            && mse::is_type_supported(media_type)
     }
 
     fn set_capture_mocking(&self, mock: bool) {

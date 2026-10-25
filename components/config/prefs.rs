@@ -248,6 +248,13 @@ pub struct Preferences {
     /// <https://drafts.csswg.org/cssom-view/#the-visualviewport-interface>
     // feature: VisualViewport | #41341 | Web/API/VisualViewport
     pub dom_visual_viewport_enabled: bool,
+    /// Media Source Extensions (`MediaSource`, `SourceBuffer`). Needs the GStreamer media
+    /// backend with the gstmse library (gst-plugins-bad 1.24 or later).
+    /// <https://w3c.github.io/media-source/>
+    pub dom_media_source_enabled: bool,
+    /// `navigator.mediaCapabilities` (`decodingInfo()` answers from the media backend; Servo has
+    /// no EME, so no key systems). <https://w3c.github.io/media-capabilities/>
+    pub dom_media_capabilities_enabled: bool,
     /// True to compile all WebRender shaders when Servo initializes. This is mostly
     /// useful when modifying the shaders, to ensure they all compile after each change is
     /// made.
@@ -520,6 +527,8 @@ impl Preferences {
             dom_worklet_testing_enabled: false,
             dom_worklet_timeout_ms: 10,
             dom_visual_viewport_enabled: false,
+            dom_media_source_enabled: false,
+            dom_media_capabilities_enabled: false,
             accessibility_enabled: false,
             expensive_accessibility_test_assertions_enabled: false,
             fonts_default: String::new(),
