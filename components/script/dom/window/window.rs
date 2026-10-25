@@ -170,6 +170,7 @@ use crate::dom::location::Location;
 use crate::dom::medialist::MediaList;
 use crate::dom::mediaquerylist::{MediaQueryList, MediaQueryListMatchState};
 use crate::dom::mediaquerylistevent::MediaQueryListEvent;
+use crate::dom::mediasource::MediaSource;
 use crate::dom::messageevent::MessageEvent;
 use crate::dom::navigator::Navigator;
 use crate::dom::node::{Node, NodeDamage, NodeTraits, from_untrusted_node_address};
@@ -483,6 +484,10 @@ pub(crate) struct Window {
     /// <https://drafts.csswg.org/cssom-view/#dom-window-visualviewport>
     visual_viewport: MutNullableDom<VisualViewport>,
 
+    /// The media sources of `URL.createObjectURL(mediaSource)`, by URL (the MediaSource object
+    /// URLs of <https://w3c.github.io/media-source/#dom-url-createobjecturl>).
+    media_source_urls: DomRefCell<HashMapTracedValues<String, Dom<MediaSource>, FxBuildHasher>>,
+
     /// [`VisualViewport`] dimension changed and we need to process it on the next tick.
     has_changed_visual_viewport_dimension: Cell<bool>,
 
@@ -508,6 +513,28 @@ pub(crate) struct Window {
 }
 
 impl Window {
+    /// Remembers a `MediaSource` object URL (`URL.createObjectURL`).
+    pub(crate) fn add_media_source_url(&self, url: String, media_source: &MediaSource) {
+        self.media_source_urls
+            .borrow_mut()
+            .0
+            .insert(url, Dom::from_ref(media_source));
+    }
+
+    /// Forgets a `MediaSource` object URL (`URL.revokeObjectURL`).
+    pub(crate) fn remove_media_source_url(&self, url: &str) {
+        self.media_source_urls.borrow_mut().0.remove(url);
+    }
+
+    /// The `MediaSource` a media element's `src` names.
+    pub(crate) fn media_source_for_url(&self, url: &str) -> Option<DomRoot<MediaSource>> {
+        self.media_source_urls
+            .borrow()
+            .0
+            .get(url)
+            .map(|media_source| DomRoot::from_ref(&**media_source))
+    }
+
     pub(crate) fn script_thread(&self) -> Rc<ScriptThread> {
         Weak::upgrade(&self.weak_script_thread)
             .expect("Weak reference should always be upgradable when a ScriptThread is running")
@@ -849,7 +876,11 @@ impl Window {
             return false;
         }
         channel.origin.as_ref().is_none_or(|origin| {
-            *origin == self.as_global_scope().origin().immutable().ascii_serialization()
+            *origin ==
+                self.as_global_scope()
+                    .origin()
+                    .immutable()
+                    .ascii_serialization()
         })
     }
 
@@ -4053,6 +4084,7 @@ impl Window {
             script_window_proxies: ScriptThread::window_proxies(),
             has_pending_screenshot_readiness_request: Default::default(),
             visual_viewport: Default::default(),
+            media_source_urls: Default::default(),
             weak_script_thread,
             has_changed_visual_viewport_dimension: Default::default(),
             pending_media_query_evaluation: Default::default(),

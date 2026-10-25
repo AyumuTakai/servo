@@ -58,13 +58,13 @@ use crate::dom::bindings::codegen::Bindings::HTMLMediaElementBinding::{
 };
 use crate::dom::bindings::codegen::Bindings::MediaErrorBinding::MediaErrorConstants::*;
 use crate::dom::bindings::codegen::Bindings::MediaErrorBinding::MediaErrorMethods;
+use crate::dom::bindings::codegen::Bindings::MediaSourceBinding::ReadyState as MediaSourceReadyState;
 use crate::dom::bindings::codegen::Bindings::NavigatorBinding::Navigator_Binding::NavigatorMethods;
 use crate::dom::bindings::codegen::Bindings::NodeBinding::Node_Binding::NodeMethods;
 use crate::dom::bindings::codegen::Bindings::TextTrackBinding::{
     TextTrackKind, TextTrackMethods, TextTrackMode,
 };
 use crate::dom::bindings::codegen::Bindings::TextTrackCueBinding::TextTrackCueMethods;
-use crate::dom::bindings::codegen::Bindings::URLBinding::URLMethods;
 use crate::dom::bindings::codegen::Bindings::WindowBinding::Window_Binding::WindowMethods;
 use crate::dom::bindings::codegen::UnionTypes::{
     MediaStreamOrBlob, VideoTrackOrAudioTrackOrTextTrack,
@@ -94,6 +94,7 @@ use crate::dom::html::htmlvideoelement::HTMLVideoElement;
 use crate::dom::mediaerror::MediaError;
 use crate::dom::mediafragmentparser::MediaFragmentParser;
 use crate::dom::medialist::MediaList;
+use crate::dom::mediasource::MediaSource;
 use crate::dom::mediastream::MediaStream;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{Node, NodeDamage, NodeTraits, UnbindContext};
@@ -595,6 +596,9 @@ pub(crate) struct HTMLMediaElement {
     #[ignore_malloc_size_of = "servo_media"]
     #[no_trace]
     player: DomRefCell<Option<Arc<Mutex<dyn Player>>>>,
+    /// The `MediaSource` this element plays (its assigned media provider object, through a
+    /// MediaSource object URL). <https://w3c.github.io/media-source/#mediasource-attach>
+    media_source: MutNullableDom<MediaSource>,
     #[conditional_malloc_size_of]
     #[no_trace]
     video_renderer: Arc<Mutex<MediaFrameRenderer>>,
@@ -735,6 +739,7 @@ impl HTMLMediaElement {
             pending_play_promises: Default::default(),
             in_flight_play_promises_queue: Default::default(),
             player: Default::default(),
+            media_source: Default::default(),
             video_renderer: Arc::new(Mutex::new(MediaFrameRenderer::new(
                 document.webview_id(),
                 document.window().paint_api().clone(),
@@ -1582,7 +1587,8 @@ impl HTMLMediaElement {
         // then the load failed.
         // Note that the resource fetch algorithm itself takes care
         // of the cleanup in case of failure itself.
-        self.resource_fetch_algorithm(cx, Resource::Url(url_record));
+        let resource = self.resource_for_url(url_record);
+        self.resource_fetch_algorithm(cx, resource);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#concept-media-load-algorithm>
@@ -1657,7 +1663,8 @@ impl HTMLMediaElement {
         // algorithm returns without aborting this one, then the load failed.
         // Note that the resource fetch algorithm itself takes care
         // of the cleanup in case of failure itself.
-        self.resource_fetch_algorithm(cx, Resource::Url(url_record));
+        let resource = self.resource_for_url(url_record);
+        self.resource_fetch_algorithm(cx, resource);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#concept-media-load-algorithm>
@@ -1890,8 +1897,36 @@ impl HTMLMediaElement {
         // TODO: Feature policy: https://html.spec.whatwg.org/iframe-embed-object.html#allowed-to-use
     }
 
+    /// A MediaSource object URL names a media source; any other URL, a resource to fetch.
+    /// <https://w3c.github.io/media-source/#mediasource-attach>
+    fn resource_for_url(&self, url: ServoUrl) -> Resource {
+        if url.scheme() == "blob" &&
+            let Some(media_source) = self.owner_window().media_source_for_url(url.as_str())
+        {
+            return Resource::MediaSource(media_source);
+        }
+        Resource::Url(url)
+    }
+
+    /// Runs `f` with the media player, if there is one.
+    pub(crate) fn with_player<R>(&self, f: impl FnOnce(&dyn Player) -> R) -> Option<R> {
+        let player = self.player.borrow();
+        let player = player.as_ref()?;
+        let player = player.lock().unwrap();
+        Some(f(&*player))
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#concept-media-load-resource>
     fn resource_fetch_algorithm(&self, cx: &JSContext, resource: Resource) {
+        // <https://w3c.github.io/media-source/#mediasource-attach>: a media source that is not
+        // closed cannot be attached (it is attached to another element).
+        if let Resource::MediaSource(ref media_source) = resource &&
+            media_source.ready_state() != MediaSourceReadyState::Closed
+        {
+            self.resource_selection_algorithm_failure_steps(cx);
+            return;
+        }
+
         if let Err(e) = self.create_media_player(&resource) {
             error!("Create media player error {:?}", e);
             self.resource_selection_algorithm_failure_steps(cx);
@@ -1954,11 +1989,19 @@ impl HTMLMediaElement {
                 // Steps 5.remote.2-5.remote.8
                 self.fetch_request(cx, None, None);
             },
+            // <https://w3c.github.io/media-source/#mediasource-attach>
+            Resource::MediaSource(media_source) => {
+                // Set the networkState to NETWORK_LOADING. The media source opens (and fires
+                // sourceopen) when the player reports that its source is attached.
+                self.network_state.set(NetworkState::Loading);
+                self.media_source.set(Some(&media_source));
+                media_source.attach(self);
+            },
             Resource::Object => {
                 if let Some(ref src_object) = *self.src_object.borrow() {
                     match src_object {
                         SrcObject::Blob(blob) => {
-                            let blob_url = URL::CreateObjectURL(&self.global(), blob);
+                            let blob_url = URL::create_blob_url(&self.global(), blob);
                             *self.blob_url.borrow_mut() =
                                 Some(ServoUrl::parse(&blob_url.str()).expect("infallible"));
                             self.fetch_request(cx, None, None);
@@ -2121,6 +2164,12 @@ impl HTMLMediaElement {
         // Reset the media player for any previously playing media resource (see Step 11).
         self.reset_media_player(cx.no_gc());
 
+        // Step 7.3. If the media element's assigned media provider object is a MediaSource
+        // object, then detach it. (Done whatever the networkState: the player is gone.)
+        if let Some(media_source) = self.media_source.take() {
+            media_source.detach();
+        }
+
         // Step 7. If the media element's networkState is not set to NETWORK_EMPTY, then:
         if network_state != NetworkState::Empty {
             // Step 7.1. Queue a media element task given the media element to fire an event named
@@ -2133,8 +2182,7 @@ impl HTMLMediaElement {
                 current_fetch_context.cancel(CancelReason::Abort);
             }
 
-            // TODO Step 7.3. If the media element's assigned media provider object is a MediaSource
-            // object, then detach it.
+            // Step 7.3 (detaching the MediaSource) is done above.
 
             // Step 7.4. Forget the media element's media-resource-specific tracks.
             self.AudioTracks(cx).clear();
@@ -2515,6 +2563,7 @@ impl HTMLMediaElement {
                     return Err(());
                 }
             },
+            Resource::MediaSource(_) => StreamType::MediaSource,
             _ => StreamType::Seekable,
         };
 
@@ -3900,7 +3949,12 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
     /// <https://html.spec.whatwg.org/multipage/#dom-media-buffered>
     fn Buffered(&self, cx: &mut JSContext) -> DomRoot<TimeRanges> {
         let mut buffered = TimeRangesContainer::default();
-        if let Some(ref player) = *self.player.borrow() {
+        // <https://w3c.github.io/media-source/#htmlmediaelement-extensions-buffered>
+        if let Some(media_source) = self.media_source.get() {
+            for (start, end) in media_source.buffered() {
+                let _ = buffered.add(start, end);
+            }
+        } else if let Some(ref player) = *self.player.borrow() {
             let ranges = player.lock().unwrap().buffered();
             for range in ranges {
                 let _ = buffered.add(range.start, range.end);
@@ -4171,6 +4225,7 @@ impl MicrotaskRunnable for MediaElementMicrotask {
 enum Resource {
     Object,
     Url(ServoUrl),
+    MediaSource(DomRoot<MediaSource>),
 }
 
 #[derive(Debug, MallocSizeOf, PartialEq)]
@@ -4699,6 +4754,10 @@ impl HTMLMediaElementEventHandler {
             return;
         }
 
+        if !matches!(
+            event,
+            PlayerEvent::PositionChanged(_) | PlayerEvent::VideoFrameUpdated
+        ) {}
         match event {
             PlayerEvent::DurationChanged(duration) => element.playback_duration_changed(duration),
             PlayerEvent::EndOfStream => element.playback_end(cx),
@@ -4717,6 +4776,16 @@ impl HTMLMediaElementEventHandler {
             PlayerEvent::SeekDone(position) => element.playback_seek_done(cx, position),
             PlayerEvent::StateChanged(ref state) => element.playback_state_changed(cx, state),
             PlayerEvent::VideoFrameUpdated => element.playback_video_frame_updated(cx.no_gc()),
+            PlayerEvent::MediaSourceOpen => {
+                if let Some(media_source) = element.media_source.get() {
+                    media_source.open();
+                }
+            },
+            PlayerEvent::SourceBufferUpdateEnd { id, error } => {
+                if let Some(media_source) = element.media_source.get() {
+                    media_source.source_buffer_update_end(id, error);
+                }
+            },
         }
     }
 }
