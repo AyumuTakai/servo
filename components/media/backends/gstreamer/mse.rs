@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use glib::prelude::*;
 use glib::translate::*;
+use gstreamer::prelude::{ElementExt, PadExt, PadExtManual};
 use servo_base::generic_channel::GenericCallback;
 use servo_media_player::{MediaSourceEndOfStreamError, PlayerError, PlayerEvent};
 
@@ -98,11 +99,6 @@ unsafe extern "C" {
         offset: GstClockTime,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
-    fn gst_source_buffer_set_append_window_start(
-        buffer: *mut GstObject,
-        start: GstClockTime,
-        error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
     fn gst_source_buffer_set_append_window_end(
         buffer: *mut GstObject,
         end: GstClockTime,
@@ -111,11 +107,6 @@ unsafe extern "C" {
     fn gst_source_buffer_set_append_mode(
         buffer: *mut GstObject,
         mode: c_int,
-        error: *mut *mut GError,
-    ) -> glib::ffi::gboolean;
-    fn gst_source_buffer_change_content_type(
-        buffer: *mut GstObject,
-        type_: *const c_char,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
 }
@@ -251,7 +242,6 @@ enum PendingOperation {
     TimestampOffset(GstClockTime),
     AppendWindow(GstClockTime, GstClockTime),
     Mode(c_int),
-    ChangeType(CString),
 }
 
 /// The state the signal handlers of a gstmse source buffer share with us.
@@ -416,6 +406,10 @@ impl MediaSource {
                 return None;
             }
             let error = signal_state.errored.swap(false, Ordering::SeqCst);
+            // This runs on the event thread of this source buffer, which only waits here.
+            if !error {
+                wait_until_parsed(object.as_ptr() as *mut GstObject);
+            }
             let _ = observer
                 .lock()
                 .unwrap()
@@ -434,7 +428,6 @@ impl MediaSource {
                     set_append_window(raw, buffer.known_layout, start, end)
                 },
                 PendingOperation::Mode(mode) => set_append_mode(raw, mode),
-                PendingOperation::ChangeType(mime_type) => change_content_type(raw, &mime_type),
             };
             if let Err(error) = result {
                 log::warn!("MSE: an operation that waited failed: {error:?}");
@@ -501,7 +494,6 @@ impl MediaSource {
                 set_append_window(raw, buffer.known_layout, start, end)
             },
             PendingOperation::Mode(mode) => set_append_mode(raw, mode),
-            PendingOperation::ChangeType(mime_type) => change_content_type(raw, &mime_type),
         }
     }
 
@@ -570,30 +562,20 @@ impl MediaSource {
         })
     }
 
+    /// The buffered ranges of a source buffer. gstmse (qtdemux) does not apply the edit list of a
+    /// fragmented MP4, so the first frame of H.264 with B frames starts one frame late (0.0167s at
+    /// 60fps), where Chrome starts at 0: YouTube then thinks its first segment did not land and
+    /// asks for it again and again. A first range that starts within `START_SLACK` starts at 0.
     pub fn buffered(&self, id: usize) -> Vec<Range<f64>> {
-        self.with_buffer(id, |object| {
-            let mut error: *mut GError = ptr::null_mut();
-            // SAFETY: the result is a new GArray of `GstMediaSourceRange`, or NULL.
-            let array = unsafe { gst_source_buffer_get_buffered(object, &mut error) };
-            if array.is_null() {
-                return Err(PlayerError::MediaSource(error_message(error)));
-            }
-            // SAFETY: the array holds `len` ranges; we free it after copying them.
-            let ranges = unsafe {
-                let len = (*array).len as usize;
-                let data = (*array).data as *const GstMediaSourceRange;
-                let ranges = (0..len)
-                    .map(|i| {
-                        let range = &*data.add(i);
-                        seconds(range.start)..seconds(range.end)
-                    })
-                    .collect();
-                glib::ffi::g_array_unref(array);
-                ranges
-            };
-            Ok(ranges)
-        })
-        .unwrap_or_default()
+        const START_SLACK: f64 = 0.2;
+        let mut ranges = self.with_buffer(id, buffered_of).unwrap_or_default();
+        if let Some(first) = ranges.first_mut() &&
+            first.start > 0. &&
+            first.start <= START_SLACK
+        {
+            first.start = 0.;
+        }
+        ranges
     }
 
     pub fn set_timestamp_offset(&self, id: usize, offset: f64) -> Result<(), PlayerError> {
@@ -617,10 +599,29 @@ impl MediaSource {
         self.run(id, PendingOperation::Mode(mode))
     }
 
+    /// gstmse cannot change the type of a source buffer (`gst_source_buffer_change_content_type()`
+    /// always fails, 1.24 to main). Its parser finds the codecs in the initialization segments, so
+    /// a new type in the same container (another profile or level of the codec at a quality
+    /// switch) needs nothing; another container cannot be played.
     pub fn change_type(&self, id: usize, mime_type: &str) -> Result<(), PlayerError> {
-        let mime_type =
-            CString::new(mime_type).map_err(|_| PlayerError::MediaSource("bad type".to_owned()))?;
-        self.run(id, PendingOperation::ChangeType(mime_type))
+        let container = |mime_type: &str| {
+            mime_type
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+        };
+        let buffers = self.source_buffers.lock().unwrap();
+        let buffer = buffers
+            .get(&id)
+            .ok_or_else(|| PlayerError::MediaSource("no such source buffer".to_owned()))?;
+        if container(&buffer.mime_type.to_string_lossy()) == container(mime_type) {
+            return Ok(());
+        }
+        Err(PlayerError::MediaSource(
+            "gstmse cannot change the container of a source buffer".to_owned(),
+        ))
     }
 }
 
@@ -628,6 +629,54 @@ impl Drop for MediaSource {
     fn drop(&mut self) {
         self.source_buffers.lock().unwrap().clear();
         self.detach();
+    }
+}
+
+/// The buffered ranges of a gstmse source buffer.
+fn buffered_of(object: *mut GstObject) -> Result<Vec<Range<f64>>, PlayerError> {
+    let mut error: *mut GError = ptr::null_mut();
+    // SAFETY: the result is a new GArray of `GstMediaSourceRange`, or NULL.
+    let array = unsafe { gst_source_buffer_get_buffered(object, &mut error) };
+    if array.is_null() {
+        return Err(PlayerError::MediaSource(error_message(error)));
+    }
+    // SAFETY: the array holds `len` ranges; we free it after copying them.
+    let ranges = unsafe {
+        let len = (*array).len as usize;
+        let data = (*array).data as *const GstMediaSourceRange;
+        let ranges = (0..len)
+            .map(|i| {
+                let range = &*data.add(i);
+                seconds(range.start)..seconds(range.end)
+            })
+            .collect();
+        glib::ffi::g_array_unref(array);
+        ranges
+    };
+    Ok(ranges)
+}
+
+/// gstmse ends an append when it gave the bytes to its parser, before the coded frames are in
+/// the source buffer: the page that reads `buffered` at `updateend` sees the data missing
+/// (YouTube asks the server for the same segment again and again, then stops). Wait until the
+/// buffered ranges stop changing: unchanged for `SETTLED`, at most `MAX_WAIT`. The parser takes
+/// a few milliseconds per segment.
+fn wait_until_parsed(object: *mut GstObject) {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(5);
+    const SETTLED: std::time::Duration = std::time::Duration::from_millis(25);
+    const MAX_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+    let start = std::time::Instant::now();
+    let mut last = buffered_of(object).unwrap_or_default();
+    let mut last_change = start;
+    while start.elapsed() < MAX_WAIT {
+        std::thread::sleep(POLL);
+        let now = buffered_of(object).unwrap_or_default();
+        if now != last {
+            last = now;
+            last_change = std::time::Instant::now();
+        } else if last_change.elapsed() >= SETTLED {
+            return;
+        }
     }
 }
 
@@ -701,9 +750,97 @@ fn set_append_mode(object: *mut GstObject, mode: c_int) -> Result<(), PlayerErro
     check(|error| unsafe { gst_source_buffer_set_append_mode(object, mode, error) })
 }
 
-fn change_content_type(object: *mut GstObject, mime_type: &CString) -> Result<(), PlayerError> {
-    // SAFETY: the object is alive and the string is NUL-terminated.
-    check(|error| unsafe {
-        gst_source_buffer_change_content_type(object, mime_type.as_ptr(), error)
-    })
+/// gstmse keeps every coded frame a source buffer receives: it does not remove the frames an
+/// append overlaps (the coded frame removal of the coded frame processing), and its `remove()`
+/// does nothing. A player that switches the quality appends the new format over a time range it
+/// already has (YouTube does it at every quality switch), and `msesrc` then sends the frames of
+/// both formats, in decoding order: the caps change at every frame, the decoder renegotiates
+/// each time, the picture breaks, and the media info updates flood the page (its scripts stop).
+///
+/// gstmse also sends the frames of a track again from its start when it restarts feeding it (it
+/// does at a quality switch, which makes a new track): the time goes back and the picture stops.
+///
+/// This filter on the pads of `msesrc` sends each time range once, in one format: a frame that
+/// ends before what was sent is dropped, and the stream switches to another format (another
+/// caps) only at a key frame that starts where what was sent ends. So the format already playing
+/// wins where both are buffered (not the newer one, as MSE says), and the newer one takes over
+/// after it.
+pub fn filter_overlapping_frames(element: &gstreamer::Element) {
+    element.connect_pad_added(|_, pad| {
+        if pad.direction() == gstreamer::PadDirection::Src {
+            add_overlap_filter(pad);
+        }
+    });
+}
+
+#[derive(Default)]
+struct OverlapFilter {
+    /// The caps of the frames that come (the last caps event).
+    incoming: Option<gstreamer::Caps>,
+    /// The caps sent downstream.
+    sent: Option<gstreamer::Caps>,
+    /// The end (decoding time + duration) of the frames sent since the last segment.
+    sent_end: Option<gstreamer::ClockTime>,
+}
+
+fn add_overlap_filter(pad: &gstreamer::Pad) {
+    let state = Mutex::new(OverlapFilter::default());
+    pad.add_probe(
+        gstreamer::PadProbeType::BUFFER | gstreamer::PadProbeType::EVENT_DOWNSTREAM,
+        move |pad, info| {
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+            match info.data {
+                Some(gstreamer::PadProbeData::Event(ref event)) => match event.view() {
+                    gstreamer::EventView::Caps(caps) => {
+                        let caps = caps.caps_owned();
+                        state.incoming = Some(caps.clone());
+                        // The first caps go through; the others when a frame of them does.
+                        if state.sent.is_none() {
+                            state.sent = Some(caps);
+                            return gstreamer::PadProbeReturn::Ok;
+                        }
+                        if state.sent.as_ref() == Some(&caps) {
+                            return gstreamer::PadProbeReturn::Ok;
+                        }
+                        gstreamer::PadProbeReturn::Drop
+                    },
+                    gstreamer::EventView::Segment(_) | gstreamer::EventView::FlushStop(_) => {
+                        state.sent_end = None;
+                        gstreamer::PadProbeReturn::Ok
+                    },
+                    _ => gstreamer::PadProbeReturn::Ok,
+                },
+                Some(gstreamer::PadProbeData::Buffer(ref buffer)) => {
+                    let (Some(start), Some(duration)) =
+                        (buffer.dts().or(buffer.pts()), buffer.duration())
+                    else {
+                        return gstreamer::PadProbeReturn::Ok;
+                    };
+                    let end = start + duration;
+                    // A frame of a time range already sent: gstmse sends the frames of a track
+                    // again from the start when it restarts feeding it (a new track at a
+                    // quality switch: thousands of frames), or it is a frame of another format.
+                    if state.sent_end.is_some_and(|sent_end| end <= sent_end) {
+                        return gstreamer::PadProbeReturn::Drop;
+                    }
+                    if state.incoming != state.sent {
+                        let is_key_frame =
+                            !buffer.flags().contains(gstreamer::BufferFlags::DELTA_UNIT);
+                        let after_sent = state.sent_end.is_none_or(|sent_end| start >= sent_end);
+                        if !(is_key_frame && after_sent) {
+                            return gstreamer::PadProbeReturn::Drop;
+                        }
+                        // Switch to the other format: give its caps to the next element.
+                        if let (Some(caps), Some(peer)) = (state.incoming.clone(), pad.peer()) {
+                            peer.send_event(gstreamer::event::Caps::new(&caps));
+                        }
+                        state.sent = state.incoming.clone();
+                    }
+                    state.sent_end = Some(state.sent_end.map_or(end, |sent_end| sent_end.max(end)));
+                    gstreamer::PadProbeReturn::Ok
+                },
+                _ => gstreamer::PadProbeReturn::Ok,
+            }
+        },
+    );
 }
