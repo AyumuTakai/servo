@@ -1002,7 +1002,6 @@ impl GStreamerPlayer {
                     },
                     StreamType::MediaSource => {
                         if let Some(ref media_source) = media_source {
-                            crate::mse::filter_overlapping_frames(&source);
                             media_source.attach(&source);
                         }
                         let sender_clone = sender.clone();
