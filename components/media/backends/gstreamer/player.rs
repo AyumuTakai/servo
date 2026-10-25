@@ -544,9 +544,11 @@ impl GStreamerPlayer {
         // Set max size for the player buffer.
         pipeline.set_property("buffer-size", MAX_BUFFER_SIZE);
 
-        // Set player position interval update to 0.5 seconds.
+        // Update the position every 0.1 seconds: currentTime moves only with these updates, and
+        // players take a position that does not move for 0.25 seconds for a stall (hls.js reported
+        // bufferStalledError all through the playback with 0.5 seconds).
         let mut config = player.config();
-        config.set_position_update_interval(500u32);
+        config.set_position_update_interval(100u32);
         player
             .set_config(config)
             .map_err(|e| PlayerError::Backend(e.to_string()))?;
