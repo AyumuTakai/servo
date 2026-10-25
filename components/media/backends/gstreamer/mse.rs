@@ -42,69 +42,70 @@ struct GstMediaSourceRange {
     end: GstClockTime,
 }
 
-#[link(name = "gstmse-1.0")]
+#[link(name = "kyousei-mse-1.0")]
 unsafe extern "C" {
-    fn gst_media_source_get_type() -> glib::ffi::GType;
-    fn gst_media_source_error_quark() -> glib::ffi::GQuark;
-    fn gst_source_buffer_get_type() -> glib::ffi::GType;
-    fn gst_media_source_new() -> *mut GstObject;
-    fn gst_media_source_is_type_supported(type_: *const c_char) -> glib::ffi::gboolean;
-    fn gst_media_source_attach(
+    fn ky_mse_register() -> glib::ffi::gboolean;
+    fn ky_media_source_get_type() -> glib::ffi::GType;
+    fn ky_media_source_error_quark() -> glib::ffi::GQuark;
+    fn ky_source_buffer_get_type() -> glib::ffi::GType;
+    fn ky_media_source_new() -> *mut GstObject;
+    fn ky_media_source_is_type_supported(type_: *const c_char) -> glib::ffi::gboolean;
+    fn ky_media_source_attach(
         media_source: *mut GstObject,
         element: *mut gstreamer::ffi::GstElement,
     );
-    fn gst_media_source_detach(media_source: *mut GstObject);
-    fn gst_media_source_add_source_buffer(
+    fn ky_media_source_detach(media_source: *mut GstObject);
+    fn ky_media_source_add_source_buffer(
         media_source: *mut GstObject,
         type_: *const c_char,
         error: *mut *mut GError,
     ) -> *mut GstObject;
-    fn gst_media_source_remove_source_buffer(
+    fn ky_media_source_remove_source_buffer(
         media_source: *mut GstObject,
         buffer: *mut GstObject,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
-    fn gst_media_source_set_duration(
+    fn ky_media_source_set_duration(
         media_source: *mut GstObject,
         duration: GstClockTime,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
-    fn gst_media_source_end_of_stream(
+    fn ky_media_source_end_of_stream(
         media_source: *mut GstObject,
         eos_error: c_int,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
-    fn gst_source_buffer_append_buffer(
+    fn ky_source_buffer_append_buffer(
         buffer: *mut GstObject,
         buf: *mut gstreamer::ffi::GstBuffer,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
-    fn gst_source_buffer_abort(
+    fn ky_source_buffer_abort(
         buffer: *mut GstObject,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
-    fn gst_source_buffer_get_updating(buffer: *mut GstObject) -> glib::ffi::gboolean;
-    fn gst_source_buffer_remove(
+    fn ky_source_buffer_get_updating(buffer: *mut GstObject) -> glib::ffi::gboolean;
+    fn ky_source_buffer_remove(
         buffer: *mut GstObject,
         start: GstClockTime,
         end: GstClockTime,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
-    fn gst_source_buffer_get_buffered(
+    fn ky_source_buffer_get_buffered(
         buffer: *mut GstObject,
         error: *mut *mut GError,
     ) -> *mut glib::ffi::GArray;
-    fn gst_source_buffer_set_timestamp_offset(
+    fn ky_source_buffer_set_timestamp_offset(
         buffer: *mut GstObject,
         offset: GstClockTime,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
-    fn gst_source_buffer_set_append_window_end(
+    fn ky_source_buffer_set_append_window_end(
         buffer: *mut GstObject,
         end: GstClockTime,
         error: *mut *mut GError,
     ) -> glib::ffi::gboolean;
-    fn gst_source_buffer_set_append_mode(
+    fn ky_source_buffer_set_append_mode(
         buffer: *mut GstObject,
         mode: c_int,
         error: *mut *mut GError,
@@ -145,7 +146,7 @@ unsafe fn check_layout_and_raise_size_limit(object: *mut GstObject, mime_type: &
     // against the size of the type) and are checked before the write.
     unsafe {
         let mut query: glib::gobject_ffi::GTypeQuery = std::mem::zeroed();
-        glib::gobject_ffi::g_type_query(gst_source_buffer_get_type(), &mut query);
+        glib::gobject_ffi::g_type_query(ky_source_buffer_get_type(), &mut query);
         if (query.instance_size as usize) < std::mem::size_of::<GstSourceBufferStart>() {
             return false;
         }
@@ -193,7 +194,7 @@ fn check(call: impl FnOnce(*mut *mut GError) -> glib::ffi::gboolean) -> Result<(
     // SAFETY: a failed call set `error` (or left it NULL).
     if !error.is_null() &&
         unsafe {
-            (*error).domain == gst_media_source_error_quark() &&
+            (*error).domain == ky_media_source_error_quark() &&
                 (*error).code == GST_MEDIA_SOURCE_ERROR_QUOTA_EXCEEDED
         }
     {
@@ -227,13 +228,25 @@ fn seconds(time: GstClockTime) -> f64 {
     time as f64 / 1_000_000_000.
 }
 
+/// Registers `kyouseimsesrc` (the `kyousei-mse://` source of `playbin3`) once.
+fn register() {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    // SAFETY: called after gst_init() (the backend initializes GStreamer first).
+    REGISTER.call_once(|| {
+        if unsafe { ky_mse_register() } == glib::ffi::GFALSE {
+            log::warn!("MSE: could not register kyouseimsesrc");
+        }
+    });
+}
+
 /// Whether the system has the gstmse library and a demuxer and decoders for this type.
 pub fn is_type_supported(mime_type: &str) -> bool {
     let Ok(mime_type) = CString::new(mime_type) else {
         return false;
     };
+    register();
     // SAFETY: a valid NUL-terminated string.
-    unsafe { gst_media_source_is_type_supported(mime_type.as_ptr()) != glib::ffi::GFALSE }
+    unsafe { ky_media_source_is_type_supported(mime_type.as_ptr()) != glib::ffi::GFALSE }
 }
 
 /// What happens to a source buffer that gstmse does not have yet (see `SourceBuffer::object`).
@@ -283,11 +296,12 @@ pub struct MediaSource {
 
 impl MediaSource {
     pub fn new(observer: Arc<Mutex<GenericCallback<PlayerEvent>>>) -> Self {
+        register();
         // SAFETY: the constructor returns a new reference.
         let object = unsafe {
-            let _ = gst_media_source_get_type();
-            let _ = gst_source_buffer_get_type();
-            take_object(gst_media_source_new())
+            let _ = ky_media_source_get_type();
+            let _ = ky_source_buffer_get_type();
+            take_object(ky_media_source_new())
         };
         let observer_ = observer.clone();
         object.connect("on-source-open", false, move |_| {
@@ -325,7 +339,7 @@ impl MediaSource {
         });
         *self.element.lock().unwrap() = Some(element.clone());
         // SAFETY: both objects are alive; gstmse checks the type of the element.
-        unsafe { gst_media_source_attach(self.ptr(), element.as_ptr()) }
+        unsafe { ky_media_source_attach(self.ptr(), element.as_ptr()) }
         // SAFETY: the element is the msesrc just attached; the layout is checked first.
         unsafe { start_at_metadata(element, self.ptr()) };
     }
@@ -333,7 +347,7 @@ impl MediaSource {
     pub fn detach(&self) {
         self.element.lock().unwrap().take();
         // SAFETY: the object is alive.
-        unsafe { gst_media_source_detach(self.ptr()) }
+        unsafe { ky_media_source_detach(self.ptr()) }
     }
 
     fn has_metadata(&self) -> bool {
@@ -371,7 +385,7 @@ impl MediaSource {
         let mut error: *mut GError = ptr::null_mut();
         // SAFETY: valid arguments; the result is a new reference or NULL with `error` set.
         let object = unsafe {
-            gst_media_source_add_source_buffer(self.ptr(), buffer.mime_type.as_ptr(), &mut error)
+            ky_media_source_add_source_buffer(self.ptr(), buffer.mime_type.as_ptr(), &mut error)
         };
         if object.is_null() {
             return Err(PlayerError::MediaSource(error_message(error)));
@@ -399,7 +413,7 @@ impl MediaSource {
                 return None;
             };
             // SAFETY: the object is alive.
-            if unsafe { gst_source_buffer_get_updating(object.as_ptr() as *mut GstObject) } !=
+            if unsafe { ky_source_buffer_get_updating(object.as_ptr() as *mut GstObject) } !=
                 glib::ffi::GFALSE
             {
                 return None;
@@ -523,13 +537,13 @@ impl MediaSource {
         };
         let object = object.as_ptr() as *mut GstObject;
         // SAFETY: both objects are alive.
-        check(|error| unsafe { gst_media_source_remove_source_buffer(self.ptr(), object, error) })
+        check(|error| unsafe { ky_media_source_remove_source_buffer(self.ptr(), object, error) })
     }
 
     pub fn set_duration(&self, duration: f64) -> Result<(), PlayerError> {
         let duration = clock_time(duration);
         // SAFETY: the object is alive.
-        check(|error| unsafe { gst_media_source_set_duration(self.ptr(), duration, error) })
+        check(|error| unsafe { ky_media_source_set_duration(self.ptr(), duration, error) })
     }
 
     pub fn end_of_stream(&self, error: MediaSourceEndOfStreamError) -> Result<(), PlayerError> {
@@ -539,7 +553,7 @@ impl MediaSource {
             MediaSourceEndOfStreamError::Decode => GST_MEDIA_SOURCE_EOS_ERROR_DECODE,
         };
         // SAFETY: the object is alive.
-        check(|error| unsafe { gst_media_source_end_of_stream(self.ptr(), eos_error, error) })
+        check(|error| unsafe { ky_media_source_end_of_stream(self.ptr(), eos_error, error) })
     }
 
     pub fn append(&self, id: usize, data: Vec<u8>) -> Result<(), PlayerError> {
@@ -552,7 +566,7 @@ impl MediaSource {
     pub fn abort(&self, id: usize) -> Result<(), PlayerError> {
         // SAFETY: the object is alive.
         self.with_buffer(id, |object| {
-            check(|error| unsafe { gst_source_buffer_abort(object, error) })
+            check(|error| unsafe { ky_source_buffer_abort(object, error) })
         })
     }
 
@@ -560,7 +574,7 @@ impl MediaSource {
         let (start, end) = (clock_time(start), clock_time(end));
         // SAFETY: the object is alive.
         self.with_buffer(id, |object| {
-            check(|error| unsafe { gst_source_buffer_remove(object, start, end, error) })
+            check(|error| unsafe { ky_source_buffer_remove(object, start, end, error) })
         })
     }
 
@@ -601,7 +615,7 @@ impl MediaSource {
         self.run(id, PendingOperation::Mode(mode))
     }
 
-    /// gstmse cannot change the type of a source buffer (`gst_source_buffer_change_content_type()`
+    /// gstmse cannot change the type of a source buffer (`ky_source_buffer_change_content_type()`
     /// always fails, 1.24 to main). Its parser finds the codecs in the initialization segments, so
     /// a new type in the same container (another profile or level of the codec at a quality
     /// switch) needs nothing; another container cannot be played.
@@ -638,7 +652,7 @@ impl Drop for MediaSource {
 fn buffered_of(object: *mut GstObject) -> Result<Vec<Range<f64>>, PlayerError> {
     let mut error: *mut GError = ptr::null_mut();
     // SAFETY: the result is a new GArray of `GstMediaSourceRange`, or NULL.
-    let array = unsafe { gst_source_buffer_get_buffered(object, &mut error) };
+    let array = unsafe { ky_source_buffer_get_buffered(object, &mut error) };
     if array.is_null() {
         return Err(PlayerError::MediaSource(error_message(error)));
     }
@@ -716,7 +730,7 @@ unsafe fn start_at_metadata(element: &gstreamer::Element, media_source: *mut Gst
         let mut query: glib::gobject_ffi::GTypeQuery = std::mem::zeroed();
         glib::gobject_ffi::g_type_query((*(*instance).g_class).g_type, &mut query);
         if query.type_name.is_null() ||
-            std::ffi::CStr::from_ptr(query.type_name).to_bytes() != b"GstMseSrc" ||
+            std::ffi::CStr::from_ptr(query.type_name).to_bytes() != b"KyMseSrc" ||
             (query.instance_size as usize) < std::mem::size_of::<GstMseSrcStart>()
         {
             return;
@@ -752,7 +766,7 @@ fn append_to(
     signal_state.outstanding.store(true, Ordering::SeqCst);
     // SAFETY: `append_buffer` takes the ownership of the buffer (transfer full).
     let result = check(|error| unsafe {
-        gst_source_buffer_append_buffer(object, data.into_glib_ptr(), error)
+        ky_source_buffer_append_buffer(object, data.into_glib_ptr(), error)
     });
     if result.is_err() {
         signal_state.outstanding.store(false, Ordering::SeqCst);
@@ -762,11 +776,11 @@ fn append_to(
 
 fn set_timestamp_offset(object: *mut GstObject, offset: GstClockTime) -> Result<(), PlayerError> {
     // SAFETY: the object is alive.
-    check(|error| unsafe { gst_source_buffer_set_timestamp_offset(object, offset, error) })
+    check(|error| unsafe { ky_source_buffer_set_timestamp_offset(object, offset, error) })
 }
 
 /// gstmse (1.24 to main, 2026-10) refuses every valid append window start: the check of
-/// `gst_source_buffer_set_append_window_start()` is reversed (`start <= append_window_end` is the
+/// `ky_source_buffer_set_append_window_start()` is reversed (`start <= append_window_end` is the
 /// error). So a source buffer of the known layout gets both ends written under its object lock;
 /// any other gets the end only. The page checked the values (start < end).
 fn set_append_window(
@@ -778,7 +792,7 @@ fn set_append_window(
     if !known_layout {
         // SAFETY: the object is alive.
         return check(|error| unsafe {
-            gst_source_buffer_set_append_window_end(object, end, error)
+            ky_source_buffer_set_append_window_end(object, end, error)
         });
     }
     // SAFETY: the layout was checked when the source buffer was made; the fields are guarded by
@@ -804,7 +818,7 @@ fn set_append_window(
 
 fn set_append_mode(object: *mut GstObject, mode: c_int) -> Result<(), PlayerError> {
     // SAFETY: the object is alive.
-    check(|error| unsafe { gst_source_buffer_set_append_mode(object, mode, error) })
+    check(|error| unsafe { ky_source_buffer_set_append_mode(object, mode, error) })
 }
 
 /// gstmse keeps every coded frame a source buffer receives: it does not remove the frames an

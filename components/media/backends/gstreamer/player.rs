@@ -592,7 +592,7 @@ impl GStreamerPlayer {
                                 .src()
                                 .and_then(|source| source.downcast_ref::<gstreamer::Element>())
                                 .and_then(|element| element.factory())
-                                .is_some_and(|factory| factory.name() == "msesrc");
+                                .is_some_and(|factory| factory.name() == "kyouseimsesrc");
                     if from_msesrc {
                         gstreamer::BusSyncReply::Drop
                     } else {
@@ -688,7 +688,7 @@ impl GStreamerPlayer {
                 })?;
                 "servosrc://".to_value()
             },
-            StreamType::MediaSource => "mse://".to_value(),
+            StreamType::MediaSource => "kyousei-mse://".to_value(),
         };
         player.set_property("uri", &uri);
 
