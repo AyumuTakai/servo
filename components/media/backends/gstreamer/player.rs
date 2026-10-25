@@ -578,6 +578,28 @@ impl GStreamerPlayer {
             // the buffering of playbin3, GstPlay paused the playback whenever the buffering level
             // was under 100%, and the media source never fills a 500MB buffer.
             unset_playbin_flag(&pipeline, "buffering")?;
+            // msesrc posts a stream collection for each initialization segment (the source
+            // buffers reach gstmse one after the other, `mse.rs`). GstPlay selects streams from
+            // the collections on the bus; selecting the streams of msesrc's newer collection
+            // before decodebin3 has it aborts the process (`handle_stream_switch: assertion
+            // failed`, "Stream switch requested for future collection"). Drop msesrc's own
+            // collections: GstPlay gets the ones decodebin3 posts once it uses them.
+            if let Some(bus) = pipeline.bus() {
+                bus.set_sync_handler(|_, message| {
+                    let from_msesrc =
+                        matches!(message.view(), gstreamer::MessageView::StreamCollection(_)) &&
+                            message
+                                .src()
+                                .and_then(|source| source.downcast_ref::<gstreamer::Element>())
+                                .and_then(|element| element.factory())
+                                .is_some_and(|factory| factory.name() == "msesrc");
+                    if from_msesrc {
+                        gstreamer::BusSyncReply::Drop
+                    } else {
+                        gstreamer::BusSyncReply::Pass
+                    }
+                });
+            }
         } else {
             // Set max size for the player buffer.
             pipeline.set_property("buffer-size", MAX_BUFFER_SIZE);
@@ -767,6 +789,23 @@ impl GStreamerPlayer {
                 } else if inner.play_state == gstreamer_play::PlayState::Paused {
                     // We need to send the paused event for non seekable push streams.
                     send_pause_event = true;
+                }
+            }
+
+            // A media source can add a stream after the first stream collection (the source
+            // buffers reach gstmse one after the other, `mse.rs`): GstPlay selects the streams of
+            // the first collection only, so a video or an audio stream added later stayed
+            // unselected (no picture, `videoWidth` 0, or no sound). Select it.
+            if inner.stream_type == StreamType::MediaSource {
+                if !info.video_streams().is_empty() && inner.player.current_video_track().is_none()
+                {
+                    let _ = inner.player.set_video_track(0);
+                    inner.player.set_video_track_enabled(true);
+                }
+                if !info.audio_streams().is_empty() && inner.player.current_audio_track().is_none()
+                {
+                    let _ = inner.player.set_audio_track(0);
+                    inner.player.set_audio_track_enabled(true);
                 }
             }
 
