@@ -9,7 +9,7 @@
 > |---|---|---|
 > | [`kyousei/v0.7.0-upstreamable`](https://github.com/AyumuTakai/servo/tree/kyousei/v0.7.0-upstreamable) | `v0.7.0` | **Fixes for Servo itself**: Servo bugs and missing standard behaviour that any embedder would hit (caret and editing in `contenteditable`, selection, IME, hit testing, `Range` rectangles, mouse events, `<svg>` flicker and memory, video frames, and more). One commit per topic, each explaining the problem and the fix. |
 > | [`kyousei/v0.7.0-kyousei-only`](https://github.com/AyumuTakai/servo/tree/kyousei/v0.7.0-kyousei-only) | `kyousei/v0.7.0-upstreamable` | The branch above plus **features and policies only Kyousei OS needs** as an embedder: downloads to files, saving cookies while running, keeping the VA-API GStreamer plugins, the body and origin of intercepted requests, and `navigator.hostChannel` (a page-to-embedder channel). |
-> | [`kyousei/v0.7.0-contenteditable-tab-caret`](https://github.com/AyumuTakai/servo/tree/kyousei/v0.7.0-contenteditable-tab-caret) | `v0.7.0` | The **working branch**: the same changes in the order they were made (including temporary debugging commits). This is what Kyousei OS builds from. |
+> | [`kyousei/v0.7.0-work`](https://github.com/AyumuTakai/servo/tree/kyousei/v0.7.0-work) | `v0.7.0` | The **working branch**: the same changes in the order they were made (including temporary debugging commits). This is what Kyousei OS builds from. |
 >
 > - The tip of `kyousei/v0.7.0-kyousei-only` has the same tree as a commit of the working branch: the two
 >   reorganized branches are the same changes, regrouped to be read. Each of their commits lists the working-branch
