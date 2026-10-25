@@ -130,6 +130,29 @@ pub(crate) fn process_box_area_request(
         let Some(transform) =
             root_transform_for_fragments(&stacking_context_tree.paint_info.scroll_tree, fragments)
         else {
+            eprintln!(
+                "[bbox-dbg] no transform: node={:?} fragments={} kinds={:?} box={:?} spatial={:?}",
+                node.opaque(),
+                fragments.len(),
+                fragments
+                    .iter()
+                    .map(|f| match f {
+                        Fragment::Box(_) => "Box",
+                        Fragment::Float(_) => "Float",
+                        Fragment::Positioning(_) => "Positioning",
+                        Fragment::Text(_) => "Text",
+                        Fragment::Image(_) => "Image",
+                        Fragment::IFrame(_) => "IFrame",
+                        Fragment::LayoutRoot(_) => "LayoutRoot",
+                        Fragment::AbsoluteOrFixedPositionedPlaceholder(_) => "Placeholder",
+                    })
+                    .collect::<Vec<_>>(),
+                fragments.first().and_then(Fragment::retrieve_box_fragment).is_some(),
+                fragments
+                    .first()
+                    .and_then(Fragment::retrieve_box_fragment)
+                    .map(|b| b.spatial_tree_node().is_some()),
+            );
             return Some(Rect::new(rect_union.origin, Size2D::zero()));
         };
 
