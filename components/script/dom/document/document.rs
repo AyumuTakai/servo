@@ -407,6 +407,9 @@ pub(crate) struct Document {
     document_or_shadow_root: DocumentOrShadowRoot,
     window: Dom<Window>,
     implementation: MutNullableDom<DOMImplementation>,
+    /// The messages of the errors the XML parser reported while it parsed this document (the document
+    /// is not well-formed when there are any). `DOMParser` turns them into a `parsererror` element.
+    xml_parse_errors: DomRefCell<Vec<String>>,
     #[ignore_malloc_size_of = "type from external crate"]
     #[no_trace]
     content_type: Mime,
@@ -3984,6 +3987,19 @@ pub(crate) enum HasBrowsingContext {
 
 impl Document {
     #[expect(clippy::too_many_arguments)]
+    /// Remember an error the XML parser reported for this document.
+    pub(crate) fn add_xml_parse_error(&self, message: String) {
+        let mut errors = self.xml_parse_errors.borrow_mut();
+        if errors.len() < 20 {
+            errors.push(message);
+        }
+    }
+
+    /// The errors the XML parser reported for this document, if any.
+    pub(crate) fn take_xml_parse_errors(&self) -> Vec<String> {
+        std::mem::take(&mut *self.xml_parse_errors.borrow_mut())
+    }
+
     pub(crate) fn new_inherited(
         window: &Window,
         has_browsing_context: HasBrowsingContext,
@@ -4055,6 +4071,7 @@ impl Document {
             window: Dom::from_ref(window),
             has_browsing_context,
             implementation: Default::default(),
+            xml_parse_errors: Default::default(),
             content_type,
             last_modified,
             url: DomRefCell::new(url),

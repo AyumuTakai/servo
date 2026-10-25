@@ -1951,6 +1951,11 @@ impl TreeSink for Sink {
 
     fn parse_error(&self, msg: Cow<'static, str>) {
         debug!("Parse error: {}", msg);
+        // The HTML parser recovers from its errors, and the page works. For XML, an error means that the
+        // document is not well-formed, which `DOMParser` reports (a `parsererror` element).
+        if matches!(self.parsing_algorithm, ParsingAlgorithm::Normal) && !self.document.is_html_document() {
+            self.document.add_xml_parse_error(msg.into_owned());
+        }
     }
 
     fn set_quirks_mode(&self, mode: QuirksMode) {
