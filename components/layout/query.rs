@@ -149,7 +149,9 @@ pub(crate) fn process_box_area_request(
                     .collect::<Vec<_>>(),
                 match fragments.first() {
                     Some(Fragment::Box(b)) | Some(Fragment::Float(b)) => format!(
-                        "visited_in_last_tree={} (set size {})",
+                        "same_node_visited={} visited_in_last_tree={} (set size {})",
+                        b.base.tag.is_some_and(|t| crate::display_list::stacking_context::VISITED_TAGS
+                            .with(|v| v.borrow().contains(&format!("{:?}", t.node)))),
                         crate::display_list::stacking_context::VISITED_BOX_FRAGMENTS
                             .with(|v| v.borrow().contains(&(std::sync::Arc::as_ptr(b) as usize))),
                         crate::display_list::stacking_context::VISITED_BOX_FRAGMENTS.with(|v| v.borrow().len())
