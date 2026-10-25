@@ -7,7 +7,8 @@ use std::cmp::min;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, mpsc};
+use std::time::{Duration, Instant};
 use std::{mem, thread_local};
 
 use imsz::imsz_from_reader;
@@ -38,6 +39,67 @@ use webrender_api::ImageKey as WebRenderImageKey;
 use webrender_api::units::DeviceIntSize;
 
 use crate::image_cache::KeyCacheState::PipelineClosed;
+
+/// How long deleting an image from WebRender is postponed. An image that has been replaced (or removed) can still be
+/// referenced by the display list WebRender is holding until the *new* display list arrives. Deleting the image
+/// right away made WebRender draw nothing for the frames in between (a visible flicker of SVG content that is updated).
+const IMAGE_DELETE_DELAY: Duration = Duration::from_millis(400);
+
+struct DeferredDelete {
+    due: Instant,
+    paint_api: CrossProcessPaintApi,
+    webview_id: WebViewId,
+    key: WebRenderImageKey,
+}
+
+fn deferred_delete_sender() -> &'static mpsc::Sender<DeferredDelete> {
+    static SENDER: OnceLock<mpsc::Sender<DeferredDelete>> = OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<DeferredDelete>();
+        let spawned = std::thread::Builder::new()
+            .name("ImageKeyDeleter".into())
+            .spawn(move || {
+                let mut pending: VecDeque<DeferredDelete> = VecDeque::new();
+                loop {
+                    let received = match pending.front() {
+                        Some(front) => rx.recv_timeout(front.due.saturating_duration_since(Instant::now())),
+                        None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+                    };
+                    match received {
+                        Ok(item) => pending.push_back(item),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {},
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                    let now = Instant::now();
+                    while pending.front().is_some_and(|item| item.due <= now) {
+                        let item = pending.pop_front().unwrap();
+                        item.paint_api.update_images(
+                            item.webview_id.into(),
+                            vec![ImageUpdate::DeleteImage(item.key)].into(),
+                        );
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            error!("Could not start the image key deleter thread: {error}");
+        }
+        tx
+    })
+}
+
+/// Delete an image from WebRender after `IMAGE_DELETE_DELAY` (see above).
+fn delete_image_later(paint_api: &CrossProcessPaintApi, webview_id: WebViewId, key: WebRenderImageKey) {
+    let item = DeferredDelete {
+        due: Instant::now() + IMAGE_DELETE_DELAY,
+        paint_api: paint_api.clone(),
+        webview_id,
+        key,
+    };
+    if let Err(mpsc::SendError(item)) = deferred_delete_sender().send(item) {
+        item.paint_api
+            .update_images(item.webview_id.into(), vec![ImageUpdate::DeleteImage(item.key)].into());
+    }
+}
 
 thread_local! {
     pub static SUPPRESS_ABORT_IN_PANIC_HOOK: Cell<bool> = const { Cell::new(false) };
@@ -725,10 +787,7 @@ impl ImageCacheStore {
             let ImageResponse::Loaded(Image::Raster(image), _) = loaded_image.image_response &&
             let Some(id) = image.id
         {
-            self.paint_api.update_images(
-                self.webview_id.into(),
-                vec![ImageUpdate::DeleteImage(id)].into(),
-            );
+            delete_image_later(&self.paint_api, self.webview_id, id);
         }
     }
 
@@ -743,10 +802,7 @@ impl ImageCacheStore {
         {
             if let Some(result) = entry.result {
                 if let Some(image_id) = result.id {
-                    self.paint_api.update_images(
-                        self.webview_id.into(),
-                        vec![ImageUpdate::DeleteImage(image_id)].into(),
-                    );
+                    delete_image_later(&self.paint_api, self.webview_id, image_id);
                 }
             } else {
                 // If there is no corresponding rasterized_vector_image result,
@@ -860,6 +916,7 @@ impl ImageCacheFactory for ImageCacheFactoryImpl {
                 svg_rasterization_task_store: SvgRasterizationTaskStore::default(),
             })),
             svg_id_image_id_map: Arc::new(Mutex::new(FxHashMap::default())),
+            last_rasterized: Arc::new(Mutex::new(FxHashMap::default())),
             broken_image_icon_data: self.broken_image_icon_data.clone(),
             thread_pool: self.thread_pool.clone(),
             usvg_options: Arc::new(opt),
@@ -868,11 +925,23 @@ impl ImageCacheFactory for ImageCacheFactoryImpl {
     }
 }
 
+/// See [`ImageCacheImpl::last_rasterized`].
+struct LastRasterized {
+    image: RasterImage,
+    /// When the SVG element was invalidated (its rasterization evicted). `None` while the rasterization is current.
+    evicted: Option<Instant>,
+    /// When this was last requested or evicted. Entries nobody has touched for a long time are dropped.
+    touched: Instant,
+}
+
 pub struct ImageCacheImpl {
     /// Per-[`ImageCache`] data.
     store: Arc<Mutex<ImageCacheStore>>,
     /// Maps an SVGElement uuid to a pending image id in the store
     svg_id_image_id_map: Arc<Mutex<FxHashMap<Uuid, PendingImageId>>>,
+    /// The latest rasterization of each SVG element, kept for a short while after the element was invalidated, so that
+    /// layout can keep showing it until the new rasterization is ready (see `stale_rasterized_image`).
+    last_rasterized: Arc<Mutex<FxHashMap<Uuid, LastRasterized>>>,
     /// The data to use for the broken image icon used when images cannot load.
     broken_image_icon_data: Arc<Vec<u8>>,
     /// Thread pool for image decoding. This is shared with other [`ImageCache`]s in the
@@ -1065,7 +1134,21 @@ impl ImageCache for ImageCacheImpl {
             .entry((image_id, requested_size))
             .or_default();
         if let Some(result) = entry.result.as_ref() {
-            return Some(result.clone());
+            let result = result.clone();
+            if let Some(svg_id) = svg_id {
+                let now = Instant::now();
+                let mut last = self.last_rasterized.lock();
+                last.retain(|_, entry| now.duration_since(entry.touched) < Duration::from_secs(60));
+                last.insert(
+                    svg_id,
+                    LastRasterized {
+                        image: result.clone(),
+                        evicted: None,
+                        touched: now,
+                    },
+                );
+            }
+            return Some(result);
         }
 
         if let Some(svg_id) = svg_id &&
@@ -1217,7 +1300,22 @@ impl ImageCache for ImageCacheImpl {
         store.remove_loaded_image(url, origin, cors_setting);
     }
 
+    fn stale_rasterized_image(&self, svg_id: &Uuid) -> Option<RasterImage> {
+        let last = self.last_rasterized.lock();
+        let entry = last.get(svg_id)?;
+        // The image is deleted from WebRender `IMAGE_DELETE_DELAY` after the eviction; stop using it a little before that.
+        let usable = entry
+            .evicted
+            .is_none_or(|at| at.elapsed() + Duration::from_millis(50) < IMAGE_DELETE_DELAY);
+        usable.then(|| entry.image.clone())
+    }
+
     fn evict_rasterized_image(&self, svg_id: &Uuid) {
+        if let Some(entry) = self.last_rasterized.lock().get_mut(svg_id) {
+            let now = Instant::now();
+            entry.evicted.get_or_insert(now);
+            entry.touched = now;
+        }
         let mut store = self.store.lock();
         if let Some(mapped_image_id) = self.svg_id_image_id_map.lock().remove(svg_id) {
             store.pending_loads.remove(&mapped_image_id);
