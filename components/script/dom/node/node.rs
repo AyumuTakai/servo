@@ -206,7 +206,11 @@ bitflags! {
         /// this element.
         const CLICK_IN_PROGRESS = 1 << 2;
 
-        // There are three free bits here.
+        /// Whether this text node holds the caret of a collapsed document selection that
+        /// is inside an editing host (`contenteditable`). Layout paints a caret for it.
+        const PAINTS_DOCUMENT_CARET = 1 << 3;
+
+        // There are two free bits here.
 
         /// Specifies whether the parser has set an associated form owner for
         /// this element. Only applicable for form-associatable elements.

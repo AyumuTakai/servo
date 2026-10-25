@@ -190,13 +190,14 @@ impl HTMLElement {
         // is lost and regained, but selection was changed beforehand. In that
         // case, we should maintain the selection as it were, by not creating
         // a new range.
-        if selection
-            .active_range(cx)
-            .is_some_and(|active| active == range)
-        {
+        let node = self.upcast::<Node>();
+        // The same goes for a selection that is already inside this editing host, for
+        // example one that a click placed at the pointer just before focus arrived.
+        if selection.active_range(cx).is_some_and(|active| {
+            active == range || node.is_inclusive_ancestor_of(&active.start_container())
+        }) {
             return;
         }
-        let node = self.upcast::<Node>();
         let mut selected_node = DomRoot::from_ref(node);
         let mut previous_eligible_node = DomRoot::from_ref(node);
         let mut previous_node = DomRoot::from_ref(node);
