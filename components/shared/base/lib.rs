@@ -73,6 +73,37 @@ where
     trace!("successfully wrote to {display}");
 }
 
+/// `data` as pretty-printed JSON (for `write_file_atomically`).
+pub fn json_bytes<T: Serialize>(data: &T) -> Result<Vec<u8>, String> {
+    serde_json::to_vec_pretty(data).map_err(|error| error.to_string())
+}
+
+/// Write `bytes` to `config_dir/filename` so that the file is never seen half written: write a
+/// temporary file next to it (readable only by its owner on Unix, since it may hold secrets such as
+/// cookies), flush it to disk, then rename it over the old file. Errors are returned, not panicked on.
+pub fn write_file_atomically(config_dir: &Path, filename: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = config_dir.join(filename);
+    let tmp = config_dir.join(format!(".{filename}.tmp"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 /// A struct for denoting the age of messages; prevents race conditions.
 #[derive(
     Clone,
