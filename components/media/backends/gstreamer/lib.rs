@@ -11,7 +11,7 @@ mod device_monitor;
 pub mod media_capture;
 pub mod media_stream;
 mod media_stream_source;
-mod mse;
+pub mod mse;
 pub mod player;
 mod registry_scanner;
 mod render;
