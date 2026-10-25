@@ -3,8 +3,9 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::Builder;
 
 use malloc_size_of_derive::MallocSizeOf;
@@ -299,14 +300,15 @@ impl AudioContext {
             sample_rate: self.sample_rate,
         };
         let make_decoder = self.make_decoder.clone();
-        Builder::new()
-            .name("AudioDecoder".to_owned())
-            .spawn(move || {
-                let audio_decoder = make_decoder();
-
-                audio_decoder.decode(data, callbacks, Some(options));
-            })
-            .unwrap();
+        let job: DecodeJob = Box::new(move || {
+            let audio_decoder = make_decoder();
+            audio_decoder.decode(data, callbacks, Some(options));
+        });
+        DECODE_QUEUE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(job);
+        start_decode_worker();
     }
 
     pub fn set_eos_callback(&self, callback: SinkEosCallback) {
@@ -362,5 +364,52 @@ impl MediaInstance for AudioContext {
         self.sender
             .send(AudioRenderThreadMsg::Resume(tx))
             .map_err(|_| MediaInstanceError)
+    }
+}
+
+type DecodeJob = Box<dyn FnOnce() + Send>;
+
+/// `decodeAudioData` calls run on a few shared threads (a page calling it in a loop used to
+/// start one thread and one pipeline per call, without limit).
+const MAX_DECODE_WORKERS: usize = 4;
+
+static DECODE_QUEUE: LazyLock<Mutex<VecDeque<DecodeJob>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static DECODE_WORKERS: Mutex<usize> = Mutex::new(0);
+
+/// Starts another worker when there are fewer than `MAX_DECODE_WORKERS`. A worker leaves when the
+/// queue is empty.
+fn start_decode_worker() {
+    let mut workers = DECODE_WORKERS.lock().unwrap_or_else(|e| e.into_inner());
+    if *workers >= MAX_DECODE_WORKERS {
+        return;
+    }
+    let spawned = Builder::new().name("AudioDecoder".to_owned()).spawn(|| {
+        loop {
+            // Checked under the workers' lock, so a job queued meanwhile either is seen
+            // here or starts a new worker.
+            let job = {
+                let mut workers = DECODE_WORKERS.lock().unwrap_or_else(|e| e.into_inner());
+                let job = DECODE_QUEUE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pop_front();
+                if job.is_none() {
+                    *workers -= 1;
+                }
+                job
+            };
+            match job {
+                // A panicking decode must not take the worker's place in the count.
+                Some(job) => {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                },
+                None => return,
+            }
+        }
+    });
+    match spawned {
+        Ok(_) => *workers += 1,
+        Err(error) => log::warn!("Could not start an audio decoder thread: {error}"),
     }
 }
