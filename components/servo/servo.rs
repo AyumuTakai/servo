@@ -922,6 +922,14 @@ impl Servo {
         // TODO: It would be better to make these private to a particular Servo instance.
         let preferences = builder.preferences.map(|opts| *opts);
         servo_config::prefs::set(preferences.unwrap_or_default());
+        // MediaSource needs libkyousei-mse (shipped with Kyousei OS, loaded at run time): without
+        // it, keep MediaSource off, so that pages fall back to what they play without it.
+        #[cfg(feature = "media-gstreamer")]
+        if pref!(dom_media_source_enabled) && !servo_media_gstreamer::mse::is_available() {
+            let mut preferences = servo_config::prefs::get().clone();
+            preferences.dom_media_source_enabled = false;
+            servo_config::prefs::set(preferences);
+        }
 
         use std::sync::atomic::Ordering;
 
