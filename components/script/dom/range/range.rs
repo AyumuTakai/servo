@@ -4,7 +4,6 @@
 
 use std::cell::LazyCell;
 use std::cmp::Ordering;
-use std::iter;
 use std::rc::Rc;
 
 use app_units::Au;
@@ -390,14 +389,30 @@ impl Range {
             }
         }
 
-        let document = start.owner_doc();
-        let unrooted_end = end.as_unrooted(no_gc);
-        start
-            .following_nodes_unrooted(no_gc, document.upcast::<Node>(), ShadowIncluding::No)
-            .take_while(move |node| *node != *end)
-            .chain(iter::once(unrooted_end))
-            .flat_map(move |node| node.border_boxes())
-            .collect()
+        // > For each element selected by the range, whose parent is not selected by the range, include the
+        // > border areas returned by invoking getClientRects() on the element.
+        // > For each Text node selected or partially selected by the range, include its rects.
+        let common_ancestor = self.CommonAncestorContainer();
+        let mut rects = vec![];
+        for node in common_ancestor.traverse_preorder(ShadowIncluding::No) {
+            let is_text = matches!(
+                node.type_id(),
+                NodeTypeId::CharacterData(CharacterDataTypeId::Text(_))
+            );
+            if is_text {
+                if self.IntersectsNode(no_gc, &node) {
+                    rects.extend(node.border_boxes());
+                }
+            } else if matches!(node.type_id(), NodeTypeId::Element(_)) &&
+                self.contains(no_gc, &node) &&
+                !node
+                    .GetParentNode()
+                    .is_some_and(|parent| self.contains(no_gc, &parent))
+            {
+                rects.extend(node.border_boxes());
+            }
+        }
+        rects
     }
 
     /// <https://dom.spec.whatwg.org/#concept-range-bp-set>
@@ -1364,9 +1379,15 @@ impl RangeMethods<crate::DomTypeHolder> for Range {
         // Step 3. If all rectangles in list have zero width or height, return the first rectangle in list.
         // Step 4. Otherwise, return a DOMRect object describing the smallest rectangle that includes all
         // of the rectangles in list of which the height or width is not zero.
+        // (The union must not start from a zero rectangle at the origin: that would always include (0, 0).)
         let bounding_rect = list
-            .into_iter()
-            .fold(euclid::Rect::zero(), |acc, rect| acc.union(&rect));
+            .iter()
+            .filter(|rect| rect.size.width.0 != 0 && rect.size.height.0 != 0)
+            .fold(None, |acc: Option<euclid::Rect<_, _>>, rect| {
+                Some(acc.map_or(*rect, |acc| acc.union(rect)))
+            })
+            .or_else(|| list.first().copied())
+            .unwrap_or_else(euclid::Rect::zero);
 
         DOMRect::new(
             cx,
