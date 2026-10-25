@@ -131,7 +131,7 @@ pub(crate) fn process_box_area_request(
             root_transform_for_fragments(&stacking_context_tree.paint_info.scroll_tree, fragments)
         else {
             eprintln!(
-                "[bbox-dbg] no transform: node={:?} fragments={} kinds={:?} box={:?} spatial={:?}",
+                "[bbox-dbg] no transform: node={:?} fragments={} kinds={:?} {} spatial={:?}",
                 node.opaque(),
                 fragments.len(),
                 fragments
@@ -147,7 +147,15 @@ pub(crate) fn process_box_area_request(
                         Fragment::AbsoluteOrFixedPositionedPlaceholder(_) => "Placeholder",
                     })
                     .collect::<Vec<_>>(),
-                fragments.first().and_then(Fragment::retrieve_box_fragment).is_some(),
+                match fragments.first() {
+                    Some(Fragment::Box(b)) | Some(Fragment::Float(b)) => format!(
+                        "visited_in_last_tree={} (set size {})",
+                        crate::display_list::stacking_context::VISITED_BOX_FRAGMENTS
+                            .with(|v| v.borrow().contains(&(std::sync::Arc::as_ptr(b) as usize))),
+                        crate::display_list::stacking_context::VISITED_BOX_FRAGMENTS.with(|v| v.borrow().len())
+                    ),
+                    _ => "n/a".to_string(),
+                },
                 fragments
                     .first()
                     .and_then(Fragment::retrieve_box_fragment)
