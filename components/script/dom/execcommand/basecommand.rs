@@ -655,7 +655,10 @@ impl CommandName {
                     // range that is collapsed to a full node and set to before a node. Chromium
                     // tracks this with a concept of "anchor position before/after node":
                     // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/core/editing/position.h;l=39;drc=a5c6d7b223bfc6028ecae4b1f17d711374238c0d
-                    return false;
+                    //
+                    // A caret after a child of the editing host (offset is not zero) is fine: there
+                    // is something before it to delete.
+                    return range.start_offset() != 0;
                 }
                 let mut current_offset = range.start_offset();
                 for current_ancestor in

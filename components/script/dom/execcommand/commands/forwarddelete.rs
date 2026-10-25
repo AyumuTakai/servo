@@ -8,6 +8,7 @@ use script_bindings::codegen::GenericBindings::SelectionBinding::SelectionMethod
 use script_bindings::inheritance::Castable;
 
 use crate::dom::document::Document;
+use crate::dom::element::Element;
 use crate::dom::html::htmlbrelement::HTMLBRElement;
 use crate::dom::html::htmlhrelement::HTMLHRElement;
 use crate::dom::html::htmlimageelement::HTMLImageElement;
@@ -78,6 +79,16 @@ pub(crate) fn execute_forward_delete_command(
             continue;
         }
 
+        // Not in the specification (browsers do this): a child that is an element that is not editable (such as
+        // an element with `contenteditable="false"`) is deleted as one unit, instead of looking inside of it.
+        if let Some(child) = node.children().nth(offset as usize) &&
+            child.is::<Element>() &&
+            !child.is_editable() &&
+            child.is_inline_node()
+        {
+            child.remove_self(cx);
+            return true;
+        }
         // Step 4.4. Otherwise, if node has a child with index offset and that child is neither a block node nor a br
         //           nor an img nor a collapsed block prop, set node to that child, then set offset to zero.
         if let Some(child) = node.children().nth(offset as usize) &&
