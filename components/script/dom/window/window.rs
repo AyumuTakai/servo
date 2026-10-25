@@ -24,7 +24,7 @@ use crossbeam_channel::{Sender, unbounded};
 use cssparser::SourceLocation;
 use devtools_traits::{ScriptToDevtoolsControlMsg, TimelineMarker, TimelineMarkerType};
 use dom_struct::dom_struct;
-use embedder_traits::user_contents::UserScript;
+use embedder_traits::user_contents::{HostChannel, UserScript};
 use embedder_traits::{
     AlertResponse, ConfirmResponse, EmbedderMsg, PromptResponse, ScriptToEmbedderChan,
     SimpleDialogRequest, Theme, UntrustedNodeAddress, ViewportDetails, WebDriverLoadStatus,
@@ -440,6 +440,10 @@ pub(crate) struct Window {
     #[conditional_malloc_size_of]
     user_scripts: Rc<Vec<UserScript>>,
 
+    /// Which documents of this `WebView` get `navigator.hostChannel` (`UserContentManager`).
+    #[no_trace]
+    host_channel: Option<HostChannel>,
+
     /// Window's GL context from application
     #[no_trace]
     player_context: WindowGLContext,
@@ -833,6 +837,20 @@ impl Window {
 
     pub(crate) fn userscripts(&self) -> &[UserScript] {
         &self.user_scripts
+    }
+
+    /// Whether this document gets `navigator.hostChannel`: the embedder gave this `WebView` a
+    /// host channel, and the document is the one it names (its origin, top-level or not).
+    pub(crate) fn has_host_channel(&self) -> bool {
+        let Some(channel) = self.host_channel.as_ref() else {
+            return false;
+        };
+        if channel.top_level_only && !self.is_top_level() {
+            return false;
+        }
+        channel.origin.as_ref().is_none_or(|origin| {
+            *origin == self.as_global_scope().origin().immutable().ascii_serialization()
+        })
     }
 
     pub(crate) fn get_player_context(&self) -> WindowGLContext {
@@ -3940,6 +3958,7 @@ impl Window {
         unminify_css: bool,
         local_script_source: Option<String>,
         user_scripts: Rc<Vec<UserScript>>,
+        host_channel: Option<HostChannel>,
         player_context: WindowGLContext,
         #[cfg(feature = "webgpu")] gpu_id_hub: Arc<IdentityHub>,
         inherited_secure_context: Option<bool>,
@@ -4022,6 +4041,7 @@ impl Window {
             exists_mut_observer: Cell::new(false),
             paint_api,
             user_scripts,
+            host_channel,
             player_context,
             throttled: Cell::new(false),
             layout_marker: DomRefCell::new(Rc::new(Cell::new(true))),

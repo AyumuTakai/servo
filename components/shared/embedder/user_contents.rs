@@ -25,6 +25,31 @@ impl UserContentManagerId {
 pub struct UserContents {
     pub scripts: Vec<UserScript>,
     pub stylesheets: Vec<UserStyleSheet>,
+    /// The channel from page script to the embedder (`navigator.hostChannel`), if any.
+    pub host_channel: Option<HostChannel>,
+}
+
+/// Which documents get `navigator.hostChannel.postMessage(message)`, a channel from page script
+/// to the embedder (`WebViewDelegate::notify_host_channel_message`). Documents that do not match
+/// have no `navigator.hostChannel` at all.
+#[derive(Clone, Debug, Deserialize, Eq, MallocSizeOf, PartialEq, Serialize)]
+pub struct HostChannel {
+    /// Only documents with this origin get the channel (its ASCII serialization, for example
+    /// `http://app.localhost`). `None`: documents of any origin.
+    pub origin: Option<String>,
+    /// Only top-level documents get the channel (not those in iframes).
+    pub top_level_only: bool,
+}
+
+/// The document that sent a message through `navigator.hostChannel`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HostChannelSender {
+    /// The URL of the document.
+    pub url: Url,
+    /// The ASCII serialization of the document's origin (`null` for an opaque origin).
+    pub origin: String,
+    /// Whether the document is a top-level document (not in an iframe).
+    pub top_level: bool,
 }
 
 impl UserContents {

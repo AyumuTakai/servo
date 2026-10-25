@@ -731,6 +731,13 @@ impl ServoInner {
                     None => self.delegate.borrow().show_console_message(level, message),
                 }
             },
+            EmbedderMsg::HostChannelMessage(webview_id, sender, message) => {
+                if let Some(webview) = self.get_webview_handle(webview_id) {
+                    webview
+                        .delegate()
+                        .notify_host_channel_message(webview, sender, message);
+                }
+            },
             EmbedderMsg::ShowEmbedderControl(control_id, position, embedder_control_request) => {
                 if let Some(webview) = self.get_webview_handle(control_id.webview_id) {
                     webview.show_embedder_control(control_id, position, embedder_control_request);

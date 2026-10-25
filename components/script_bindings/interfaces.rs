@@ -126,6 +126,10 @@ pub trait DocumentHelpers {
     fn ensure_safe_to_run_script_or_layout(&self);
 }
 
+pub trait HostChannelHelpers {
+    fn is_exposed(cx: &mut JSContext, global: HandleObject) -> bool;
+}
+
 pub trait ServoInternalsHelpers {
     fn is_servo_internal(cx: &mut JSContext, global: HandleObject) -> bool;
 }
