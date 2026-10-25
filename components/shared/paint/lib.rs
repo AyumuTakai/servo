@@ -647,10 +647,14 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
         _channel_index: u8,
         _is_composited: bool,
     ) -> ExternalImage<'_> {
-        let handler_type = self
-            .id_manager()
-            .get(&key)
-            .expect("Tried to get unknown external image");
+        let Some(handler_type) = self.id_manager().get(&key) else {
+            // The image was already removed (for example, its video player was unregistered
+            // while WebRender still draws a frame that refers to it): draw nothing.
+            return ExternalImage {
+                uv: TexelRect::new(0.0, 0.0, 0.0, 0.0),
+                source: ExternalImageSource::Invalid,
+            };
+        };
         match handler_type {
             WebRenderImageHandlerType::WebGl => {
                 let (source, size) = self.webgl_handler.as_mut().unwrap().lock(key.0);
@@ -667,6 +671,13 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
                 let (source, size) = self.media_handler.as_mut().unwrap().lock(key.0);
                 let texture_id = match source {
                     ExternalImageSource::NativeTexture(b) => b,
+                    // The player did not answer (already unregistered, or gone): draw nothing.
+                    ExternalImageSource::Invalid => {
+                        return ExternalImage {
+                            uv: TexelRect::new(0.0, 0.0, 0.0, 0.0),
+                            source: ExternalImageSource::Invalid,
+                        };
+                    },
                     _ => panic!("Wrong type"),
                 };
                 ExternalImage {
@@ -687,10 +698,9 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
     /// Unlock the external image. The WR should not read the image
     /// content after this call.
     fn unlock(&mut self, key: ExternalImageId, _channel_index: u8) {
-        let handler_type = self
-            .id_manager()
-            .get(&key)
-            .expect("Tried to get unknown external image");
+        let Some(handler_type) = self.id_manager().get(&key) else {
+            return;
+        };
         match handler_type {
             WebRenderImageHandlerType::WebGl => self.webgl_handler.as_mut().unwrap().unlock(key.0),
             WebRenderImageHandlerType::Media => self.media_handler.as_mut().unwrap().unlock(key.0),
