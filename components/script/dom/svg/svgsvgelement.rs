@@ -2,6 +2,9 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use atomic_refcell::AtomicRefCell;
 use base64::Engine as _;
 use cssparser::Parser;
@@ -30,7 +33,7 @@ use crate::dom::element::{AttributeMutation, Element};
 use crate::dom::iterators::ShadowIncluding;
 use crate::dom::node::virtualmethods::VirtualMethods;
 use crate::dom::node::{
-    ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, NodeTraits, UnbindContext,
+    BindContext, ChildrenMutation, CloneChildrenFlag, Node, NodeDamage, NodeTraits, UnbindContext,
 };
 use crate::dom::svg::svggraphicselement::SVGGraphicsElement;
 
@@ -75,7 +78,24 @@ impl SVGSVGElement {
         )
     }
 
+    /// A key made from the position of this element in the document (the tag and the index among the siblings of each
+    /// ancestor). When a page renders a part again, the new element at the same position shows the image of the removed one
+    /// until its own image is ready.
+    fn place(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for node in self.upcast::<Node>().inclusive_ancestors(ShadowIncluding::No) {
+            node.index().hash(&mut hasher);
+            if let Some(element) = node.downcast::<Element>() {
+                element.local_name().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
     pub(crate) fn serialize_and_cache_subtree(&self, cx: &mut js::context::JSContext) {
+        self.owner_window()
+            .image_cache()
+            .set_svg_place(&self.uuid, self.place());
         let document_fragment = self.owner_document().CreateDocumentFragment(cx);
         let cloned_node = Node::clone(
             cx,
@@ -103,7 +123,13 @@ impl SVGSVGElement {
 
         let xml_source: String = xml_source.into();
         let base64_encoded_source = base64::engine::general_purpose::STANDARD.encode(xml_source);
-        let data_url = format!("data:image/svg+xml;base64,{base64_encoded_source}");
+        // The url is the key of the decoded image in the image cache. Every element gets its own (the fragment is ignored by the
+        // fetch), so that the lifetime of an image is the lifetime of its element: elements with the same content do not share
+        // an image that one of them could throw away while another still shows it.
+        let data_url = format!(
+            "data:image/svg+xml;base64,{base64_encoded_source}#{}",
+            self.uuid
+        );
         match ServoUrl::parse(&data_url) {
             Ok(url) => *self.cached_serialized_data_url.borrow_mut() = Some(Ok(url)),
             Err(error) => error!("Unable to parse serialized SVG data url: {error}"),
@@ -269,6 +295,18 @@ impl VirtualMethods for SVGSVGElement {
         }
 
         self.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
+    }
+
+    fn bind_to_tree(&self, cx: &mut JSContext, context: &BindContext) {
+        if let Some(s) = self.super_type() {
+            s.bind_to_tree(cx, context);
+        }
+
+        // Serialize right away (layout would ask script to do it, one layout later): the image is requested by the first
+        // layout.
+        if context.tree_connected && self.cached_serialized_data_url.borrow().is_none() {
+            self.serialize_and_cache_subtree(cx);
+        }
     }
 
     fn unbind_from_tree(&self, cx: &mut js::context::JSContext, context: &UnbindContext<'_>) {

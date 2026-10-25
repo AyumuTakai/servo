@@ -244,6 +244,11 @@ pub trait ImageCache: Sync + Send {
     /// ago. Layout uses it to keep showing the old image until the new rasterization is ready, instead of drawing nothing.
     fn stale_rasterized_image(&self, svg_id: &Uuid) -> Option<RasterImage>;
 
+    /// Tell the cache where the SVG element with the given id is (a key made from its position in the document). When
+    /// an element is removed and a new one is created at the same place (the page rendered again), the new one shows the
+    /// old one's last image until its own image is ready (see `stale_rasterized_image`).
+    fn set_svg_place(&self, svg_id: &Uuid, place: u64);
+
     /// Removes the rasterized image from the image_cache, identified by the id of the SVG
     fn evict_rasterized_image(&self, svg_id: &Uuid);
 
