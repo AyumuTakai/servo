@@ -1,3 +1,24 @@
+> [!NOTE]
+> **About this fork (AyumuTakai/servo)**
+>
+> This fork carries changes to Servo made for **Kyousei OS**, a desktop environment that embeds Servo in its own
+> Wayland compositor. The `main` branch is not used for that work; the changes live on the `kyousei/*` branches below.
+> They are kept here, in public, as the source of the modified files (Servo is MPL-2.0).
+>
+> | Branch | Base | What it contains |
+> |---|---|---|
+> | [`kyousei/v0.7.0-upstreamable`](https://github.com/AyumuTakai/servo/tree/kyousei/v0.7.0-upstreamable) | `v0.7.0` | **Fixes for Servo itself**: Servo bugs and missing standard behaviour that any embedder would hit (caret and editing in `contenteditable`, selection, IME, hit testing, `Range` rectangles, mouse events, `<svg>` flicker and memory, video frames, and more). One commit per topic, each explaining the problem and the fix. |
+> | [`kyousei/v0.7.0-kyousei-only`](https://github.com/AyumuTakai/servo/tree/kyousei/v0.7.0-kyousei-only) | `kyousei/v0.7.0-upstreamable` | The branch above plus **features and policies only Kyousei OS needs** as an embedder: downloads to files, saving cookies while running, keeping the VA-API GStreamer plugins, the body and origin of intercepted requests, and `navigator.hostChannel` (a page-to-embedder channel). |
+> | [`kyousei/v0.7.0-contenteditable-tab-caret`](https://github.com/AyumuTakai/servo/tree/kyousei/v0.7.0-contenteditable-tab-caret) | `v0.7.0` | The **working branch**: the same changes in the order they were made (including temporary debugging commits). This is what Kyousei OS builds from. |
+>
+> - The tip of `kyousei/v0.7.0-kyousei-only` has the same tree as a commit of the working branch: the two
+>   reorganized branches are the same changes, regrouped to be read. Each of their commits lists the working-branch
+>   commits it came from (`Original commits:`).
+> - The branches only grow (no force pushes). Released states are tagged `kyousei/v<Servo version>-r<n>`.
+> - When Servo makes a new release, new `kyousei/v<new version>-*` branches are made from its tag; the old ones are kept.
+> - These changes were written with the help of an AI model. Servo does not accept AI-generated contributions, so
+>   they are **not** submitted upstream (no pull requests or issues); they are published here so that anyone can read them.
+
 # The Servo Parallel Browser Engine Project
 
 Servo is a prototype web browser engine written in the
