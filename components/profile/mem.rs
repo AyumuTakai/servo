@@ -95,10 +95,11 @@ impl Profiler {
             ProfilerMsg::UnregisterReporter(name) => {
                 debug!("Unregistering memory reporter: {}", name);
                 // Panic if it hasn't previously been registered.
-                match self.reporters.remove(&name) {
-                    Some(_) => true,
-                    None => panic!("UnregisterReporter: '{}' name is unknown", name),
+                // (Kyousei) 子プロセスは自分のプロファイラへ登録するので、親から見て未登録でも落とさない。
+                if self.reporters.remove(&name).is_none() {
+                    log::warn!("UnregisterReporter: '{}' name is unknown", name);
                 }
+                true
             },
 
             ProfilerMsg::Report(sender) => {

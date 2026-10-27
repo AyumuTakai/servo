@@ -182,7 +182,7 @@ impl EventLoop {
         let crossbeam_receiver = lifeline_receiver.route_preserving_errors();
         constellation
             .process_manager
-            .add(crossbeam_receiver, process);
+            .add(crossbeam_receiver, process, Some(id));
 
         Ok(Self {
             script_chan,

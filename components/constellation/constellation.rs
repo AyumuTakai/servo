@@ -1280,7 +1280,22 @@ where
                 self.handle_request_from_background_hang_monitor(message);
             },
             #[cfg(feature = "multiprocess")]
-            Request::RemoveProcess(index) => self.process_manager.remove(index),
+            Request::RemoveProcess(index) => {
+                // (Kyousei) コンテンツプロセスが落ちた:使っていたページを、panic と同じ経路で作り直す。
+                if let Some(event_loop_id) = self.process_manager.remove(index) {
+                    let in_use = self
+                        .pipelines
+                        .values()
+                        .any(|pipeline| pipeline.event_loop.id() == event_loop_id);
+                    if in_use {
+                        self.handle_panic(
+                            Some(event_loop_id),
+                            "The content process exited unexpectedly".to_string(),
+                            None,
+                        );
+                    }
+                }
+            },
             #[cfg(not(feature = "multiprocess"))]
             Request::RemoveProcess(_) => {},
         }
@@ -2577,7 +2592,7 @@ where
 
                     if let Ok(process) = content.spawn_multiprocess() {
                         let crossbeam_receiver = receiver.route_preserving_errors();
-                        self.process_manager.add(crossbeam_receiver, process);
+                        self.process_manager.add(crossbeam_receiver, process, None);
                     } else {
                         return warn!("Failed to spawn process for SW manager.");
                     }
