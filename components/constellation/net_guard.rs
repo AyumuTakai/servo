@@ -13,13 +13,95 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use log::warn;
+use embedder_traits::EmbedderMsg;
 use net_traits::request::{Destination, Origin};
+use servo_base::id::WebViewId;
 use net_traits::{CoreResourceMsg, CoreResourceThread};
 use servo_base::generic_channel;
 use servo_url::{ImmutableOrigin, ServoUrl};
 
 /// その子が受け持つサイトの鍵の集合(`site_key`)。
 pub(crate) type Sites = Arc<Mutex<HashSet<String>>>;
+
+/// (Kyousei) その子(コンテンツプロセス)が、パイプラインを持つ面。子の申告する面(`WebViewId`)が本当にその子のものかを、親の側で検査する。
+/// 数は、その面に載っているパイプラインの数(最上位のものは `top` にも数える)。constellation が、パイプラインの増減で更新する。
+#[derive(Default)]
+pub(crate) struct OwnedViews {
+    webviews: std::collections::HashMap<WebViewId, usize>,
+    top: std::collections::HashMap<WebViewId, usize>,
+}
+
+pub(crate) type Owned = Arc<Mutex<OwnedViews>>;
+
+impl OwnedViews {
+    pub(crate) fn add(&mut self, webview: WebViewId, top_level: bool) {
+        *self.webviews.entry(webview).or_default() += 1;
+        if top_level {
+            *self.top.entry(webview).or_default() += 1;
+        }
+    }
+
+    pub(crate) fn remove(&mut self, webview: WebViewId, top_level: bool) {
+        fn dec(m: &mut std::collections::HashMap<WebViewId, usize>, k: WebViewId) {
+            if let Some(n) = m.get_mut(&k) {
+                *n -= 1;
+                if *n == 0 {
+                    m.remove(&k);
+                }
+            }
+        }
+        dec(&mut self.webviews, webview);
+        if top_level {
+            dec(&mut self.top, webview);
+        }
+    }
+
+    pub(crate) fn has(&self, webview: WebViewId) -> bool {
+        self.webviews.contains_key(&webview)
+    }
+
+    pub(crate) fn has_top_level(&self, webview: WebViewId) -> bool {
+        self.top.contains_key(&webview)
+    }
+}
+
+/// 子から埋め込み側(コンポジタ)への通知を通してよいか。面を持つメッセージは、その子がパイプラインを持つ面のものだけ。
+/// クリップボードの読み取りと、竟成OS のシェルへのメッセージ(`HostChannelMessage`)は、さらに、その面の最上位のページを持つ子だけ
+/// (別のサイトの iframe の子が、親の面のふりをしないように)。面を持たない開発ツールの通知は、使っていないので捨てる。
+pub(crate) fn embedder_msg_allowed(owned: &Owned, msg: &EmbedderMsg) -> bool {
+    use EmbedderMsg::*;
+    let o = owned.lock().unwrap();
+    match msg {
+        HostChannelMessage(w, ..) | GetClipboardText(w, _) => o.has_top_level(*w),
+        DownloadEvent(w, _) |
+        Status(w, _) |
+        ChangePageTitle(w, _) |
+        MoveTo(w, _) |
+        ResizeTo(w, _) |
+        ShowSimpleDialog(w, _) |
+        AllowProtocolHandlerRequest(w, ..) |
+        AllowUnload(w, _) |
+        ClearClipboard(w) |
+        SetClipboardText(w, _) |
+        SetCursor(w, _) |
+        NewFavicon(w, _) |
+        GetWindowRect(w, _) |
+        GetScreenMetrics(w, _) |
+        NotifyFullscreenStateChanged(w, _) |
+        NotifyLoadStatusChanged(w, _) |
+        GetSelectedBluetoothDevice(w, ..) |
+        PromptPermission(w, ..) |
+        RequestWakeLockPermission(w, ..) |
+        InputEventsHandled(w, _) |
+        AccessibilityTreeUpdate(w, ..) => o.has(*w),
+        ShowNotification(w, _) | ShowConsoleApiMessage(w, ..) => w.is_none_or(|w| o.has(w)),
+        ShowEmbedderControl(id, ..) | HideEmbedderControl(id) => o.has(id.webview_id),
+        OnDevtoolsStarted(..) | RequestDevtoolsConnection(_) => false,
+        // 組み込んでいない機能(ゲームパッドなど)の通知は、通さない。
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
+}
 
 /// ホストの「サイトの鍵」:ドメイン名は登録ドメイン(公開サフィックスの表で求める〈eTLD+1〉)、IP アドレスと `.localhost` は、そのまま。
 /// 同じサイト(`a.example.com` と `example.com`)は同じ鍵になり、`com` や別のサイトは違う鍵になる。
