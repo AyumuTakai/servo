@@ -56,6 +56,11 @@ fn url_allowed(sites: &Sites, url: &ServoUrl) -> bool {
     }
 }
 
+/// ホスト名が、その子の受け持つサイトか(ストレージの検問からも使う)。
+pub(crate) fn host_key_allowed(sites: &Sites, host: &str) -> bool {
+    host_allowed(&sites.lock().unwrap(), host)
+}
+
 fn origin_allowed(sites: &Sites, origin: &Origin) -> bool {
     match origin {
         Origin::Origin(ImmutableOrigin::Tuple(_, host, _)) => {
@@ -113,39 +118,49 @@ fn allowed(sites: &Sites, msg: &CoreResourceMsg) -> bool {
     }
 }
 
-/// 子に渡す `CoreResourceThread`(検問つきの中継)を作る。要求は、検問を通ったものだけ、`core` へ渡る。
-pub(crate) fn guarded(core: CoreResourceThread, sites: Sites) -> CoreResourceThread {
-    let (sender, receiver) =
-        generic_channel::channel::<CoreResourceMsg>().expect("net guard channel");
+/// 子に渡す送り口(検問つきの中継)を作る。要求は、`check` を通ったものだけ、`target` へ渡る(通らないものは捨てる)。
+pub(crate) fn relay<T>(
+    name: &'static str,
+    target: generic_channel::GenericSender<T>,
+    check: impl Fn(&T) -> bool + Send + 'static,
+) -> generic_channel::GenericSender<T>
+where
+    T: for<'de> serde::Deserialize<'de> + serde::Serialize + std::fmt::Debug + Send + 'static,
+{
+    let (sender, receiver) = generic_channel::channel::<T>().expect("guard channel");
+    let trace = std::env::var("KYOUSEI_NET_GUARD_TRACE").as_deref() == Ok("1");
     std::thread::Builder::new()
-        .name("NetGuard".to_owned())
+        .name(name.to_owned())
         .spawn(move || {
-            let trace = std::env::var("KYOUSEI_NET_GUARD_TRACE").as_deref() == Ok("1");
-            warn!("net guard: 中継を始めた(trace={trace})");
             loop {
                 let msg = match receiver.recv() {
                     Ok(msg) => msg,
                     Err(servo_base::generic_channel::ReceiveError::Disconnected) => break,
                     Err(e) => {
-                        warn!("net guard: 受信に失敗(読み捨てて続ける): {e:?}");
+                        warn!("{name}: 受信に失敗(読み捨てて続ける): {e:?}");
                         continue;
                     },
                 };
                 if trace {
                     let d = format!("{msg:?}");
-                    warn!("net guard trace: {}", d.chars().take(160).collect::<String>());
+                    warn!("{name} trace: {}", d.chars().take(160).collect::<String>());
                 }
-                if allowed(&sites, &msg) {
-                    if core.send(msg).is_err() {
+                if check(&msg) {
+                    if target.send(msg).is_err() {
                         break;
                     }
                 } else {
-                    warn!("net guard: 受け持たないサイトへの要求を捨てた({:?})", std::mem::discriminant(&msg));
+                    warn!("{name}: 受け持たないサイトへの要求を捨てた({:?})", std::mem::discriminant(&msg));
                 }
             }
         })
-        .expect("net guard thread");
+        .expect("guard thread");
     sender
+}
+
+/// 子に渡す `CoreResourceThread`(検問つきの中継)を作る。
+pub(crate) fn guarded(core: CoreResourceThread, sites: Sites) -> CoreResourceThread {
+    relay("net guard", core, move |msg| allowed(&sites, msg))
 }
 
 #[cfg(test)]

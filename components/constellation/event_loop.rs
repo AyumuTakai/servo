@@ -100,6 +100,15 @@ impl EventLoop {
         } else {
             constellation.public_storage_threads.clone()
         };
+        // (Kyousei) ストレージの口にも、検問を挟む(`storage_guard.rs`)。
+        #[cfg(feature = "multiprocess")]
+        let storage_threads = if opts::get().multiprocess &&
+            std::env::var("KYOUSEI_NET_GUARD").as_deref() != Ok("0")
+        {
+            crate::storage_guard::guarded(&storage_threads, sites.clone())
+        } else {
+            storage_threads
+        };
 
         let event_loop_id = ScriptEventLoopId::new();
         let initial_script_state = InitialScriptState {

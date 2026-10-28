@@ -40,6 +40,26 @@ impl StorageThreads {
         }
     }
 
+    /// (Kyousei) 4つの口を、別の口(検問つきの中継)に差し替えた `StorageThreads` を作る(コンテンツプロセスに渡す用)。
+    pub fn map_senders(
+        &self,
+        client: impl FnOnce(
+            GenericSender<ClientStorageThreadMessage>,
+        ) -> GenericSender<ClientStorageThreadMessage>,
+        idb: impl FnOnce(GenericSender<IndexedDBThreadMsg>) -> GenericSender<IndexedDBThreadMsg>,
+        web: impl FnOnce(GenericSender<WebStorageThreadMsg>) -> GenericSender<WebStorageThreadMsg>,
+        cache: impl FnOnce(
+            GenericSender<CacheStorageThreadMessage>,
+        ) -> GenericSender<CacheStorageThreadMessage>,
+    ) -> StorageThreads {
+        StorageThreads {
+            client_storage_thread: client(self.client_storage_thread.clone()),
+            idb_thread: idb(self.idb_thread.clone()),
+            web_storage_thread: web(self.web_storage_thread.clone()),
+            cache_storage_thread: cache(self.cache_storage_thread.clone()),
+        }
+    }
+
     pub fn persisted(
         &self,
         origin: ImmutableOrigin,
