@@ -129,7 +129,17 @@ impl EventLoop {
         let event_loop_id = ScriptEventLoopId::new();
         let initial_script_state = InitialScriptState {
             id: event_loop_id,
-            script_to_constellation_sender: constellation.script_sender.clone(),
+            script_to_constellation_sender: if guard_embedder {
+                // (Kyousei) 子から constellation への要求の送り主(面・パイプライン)を、親の側で検査する中継。
+                let owned = owned.clone();
+                crate::net_guard::relay(
+                    "constellation guard",
+                    constellation.script_sender.clone(),
+                    move |msg| crate::net_guard::constellation_msg_allowed(&owned, msg),
+                )
+            } else {
+                constellation.script_sender.clone()
+            },
             script_to_embedder_sender,
             namespace_request_sender: constellation.namespace_ipc_sender.clone(),
             devtools_server_sender: constellation.script_to_devtools_callback(),
@@ -143,7 +153,16 @@ impl EventLoop {
             constellation_to_script_sender: script_chan,
             constellation_to_script_receiver: script_port,
             pipeline_namespace_id: constellation.next_pipeline_namespace_id(),
-            cross_process_paint_api: constellation.paint_proxy.cross_process_paint_api.clone(),
+            cross_process_paint_api: if guard_embedder {
+                // (Kyousei) 子から描画への要求の面を、親の側で検査する(`net_guard::paint_msg_allowed`)。
+                let owned = owned.clone();
+                constellation
+                    .paint_proxy
+                    .cross_process_paint_api
+                    .filtered(move |msg| crate::net_guard::paint_msg_allowed(&owned, msg))
+            } else {
+                constellation.paint_proxy.cross_process_paint_api.clone()
+            },
             #[cfg(feature = "webgl")]
             webgl_chan: constellation
                 .webgl_threads

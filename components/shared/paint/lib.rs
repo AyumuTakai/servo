@@ -229,6 +229,24 @@ impl CrossProcessPaintApi {
         CrossProcessPaintApi(callback)
     }
 
+    /// (Kyousei) 親の側で検問を挟んだ口を作る(コンテンツプロセスに渡す)。`filter` が偽のメッセージは捨てる。
+    /// コンテンツプロセスは、メッセージの中の面(`WebViewId`)を申告するので、乗っ取られた子が、別の面に描くのを防ぐ。
+    /// 通したメッセージは、元の口へ、そのまま(複製せず)渡す。
+    pub fn filtered(&self, mut filter: impl FnMut(&PaintMessage) -> bool + Send + 'static) -> Self {
+        let target = self.0.clone();
+        let callback = GenericCallback::new(move |msg| match msg {
+            Ok(msg) if filter(&msg) => {
+                if let Err(e) = target.send(msg) {
+                    warn!("Error forwarding a paint message: {e}");
+                }
+            },
+            Ok(msg) => warn!("Dropped a paint message from a content process: {msg:?}"),
+            Err(e) => warn!("Paint message error: {e}"),
+        })
+        .expect("paint guard callback");
+        Self(callback)
+    }
+
     /// Create a new [`CrossProcessPaintApi`] struct that does not have a listener on the other
     /// end to use for unit testing.
     pub fn dummy() -> Self {

@@ -1056,7 +1056,11 @@ where
         };
         // (Kyousei) 子が最初の通知を送る前に、受け持つ面に足す(`Pipeline::spawn` が、子へ作成を頼む)。取り除くのは `handle_pipeline_exited`。
         let top_level = browsing_context_id == BrowsingContextId::from(webview_id);
-        event_loop.owned.lock().unwrap().add(webview_id, top_level);
+        event_loop
+            .owned
+            .lock()
+            .unwrap()
+            .add(webview_id, new_pipeline_id, top_level);
         let spawn_event_loop = event_loop.clone();
         let pipeline = match Pipeline::spawn(new_pipeline_info, event_loop, self, webview_hidden) {
             Ok(pipeline) => pipeline,
@@ -1065,7 +1069,7 @@ where
                     .owned
                     .lock()
                     .unwrap()
-                    .remove(webview_id, top_level);
+                    .remove(new_pipeline_id);
                 return self.handle_send_error(new_pipeline_id, error);
             },
         };
@@ -1083,7 +1087,7 @@ where
             .owned
             .lock()
             .unwrap()
-            .add(pipeline.webview_id, top_level);
+            .add(pipeline.webview_id, pipeline.id, top_level);
     }
 
     /// Get an iterator for the fully active browsing contexts in a subtree.
@@ -3032,10 +3036,7 @@ where
             return;
         };
         // (Kyousei) 受け持つ面から外す。
-        pipeline.event_loop.owned.lock().unwrap().remove(
-            pipeline.webview_id,
-            pipeline.browsing_context_id == BrowsingContextId::from(pipeline.webview_id),
-        );
+        pipeline.event_loop.owned.lock().unwrap().remove(pipeline.id);
 
         // Clean up any registered interests for this pipeline.
         self.pipeline_interests.retain(|_, set| {

@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 use log::warn;
 use embedder_traits::EmbedderMsg;
 use net_traits::request::{Destination, Origin};
-use servo_base::id::WebViewId;
+use paint_api::PaintMessage;
+use servo_base::id::{PainterId, PipelineId, TEST_WEBVIEW_ID, WebViewId};
+use servo_constellation_traits::ScriptToConstellationMessage;
 use net_traits::{CoreResourceMsg, CoreResourceThread};
 use servo_base::generic_channel;
 use servo_url::{ImmutableOrigin, ServoUrl};
@@ -23,46 +25,150 @@ use servo_url::{ImmutableOrigin, ServoUrl};
 /// その子が受け持つサイトの鍵の集合(`site_key`)。
 pub(crate) type Sites = Arc<Mutex<HashSet<String>>>;
 
-/// (Kyousei) その子(コンテンツプロセス)が、パイプラインを持つ面。子の申告する面(`WebViewId`)が本当にその子のものかを、親の側で検査する。
-/// 数は、その面に載っているパイプラインの数(最上位のものは `top` にも数える)。constellation が、パイプラインの増減で更新する。
+/// (Kyousei) その子(コンテンツプロセス)が持つパイプライン(とその面)。子の申告する面(`WebViewId`)・パイプライン(`PipelineId`)が、
+/// 本当にその子のものかを、親の側で検査する。constellation が、パイプラインの増減で更新する。
 #[derive(Default)]
 pub(crate) struct OwnedViews {
-    webviews: std::collections::HashMap<WebViewId, usize>,
-    top: std::collections::HashMap<WebViewId, usize>,
+    /// パイプライン → (面, 面の最上位のパイプラインか)。
+    pipelines: std::collections::HashMap<PipelineId, (WebViewId, bool)>,
+    /// 最近なくなったパイプライン(終了の知らせが、constellation の後始末より遅れて届くため)。
+    retired: std::collections::VecDeque<(PipelineId, WebViewId)>,
 }
+
+const RETIRED_MAX: usize = 512;
 
 pub(crate) type Owned = Arc<Mutex<OwnedViews>>;
 
 impl OwnedViews {
-    pub(crate) fn add(&mut self, webview: WebViewId, top_level: bool) {
-        *self.webviews.entry(webview).or_default() += 1;
-        if top_level {
-            *self.top.entry(webview).or_default() += 1;
+    pub(crate) fn add(&mut self, webview: WebViewId, pipeline: PipelineId, top_level: bool) {
+        self.pipelines.insert(pipeline, (webview, top_level));
+    }
+
+    pub(crate) fn remove(&mut self, pipeline: PipelineId) {
+        if let Some((webview, _)) = self.pipelines.remove(&pipeline) {
+            if self.retired.len() >= RETIRED_MAX {
+                self.retired.pop_front();
+            }
+            self.retired.push_back((pipeline, webview));
         }
     }
 
-    pub(crate) fn remove(&mut self, webview: WebViewId, top_level: bool) {
-        fn dec(m: &mut std::collections::HashMap<WebViewId, usize>, k: WebViewId) {
-            if let Some(n) = m.get_mut(&k) {
-                *n -= 1;
-                if *n == 0 {
-                    m.remove(&k);
-                }
-            }
-        }
-        dec(&mut self.webviews, webview);
-        if top_level {
-            dec(&mut self.top, webview);
-        }
+    /// `owns` に加えて、最近なくなったパイプラインも。
+    pub(crate) fn owns_recent(&self, webview: WebViewId, pipeline: PipelineId) -> bool {
+        self.owns(webview, pipeline) || self.retired.contains(&(pipeline, webview))
+    }
+
+    /// その描画の単位(`PainterId`。面ごと)の面を、この子が持っているか。
+    pub(crate) fn has_painter(&self, painter: PainterId) -> bool {
+        self.pipelines
+            .values()
+            .any(|(w, _)| PainterId::from(*w) == painter)
     }
 
     pub(crate) fn has(&self, webview: WebViewId) -> bool {
-        self.webviews.contains_key(&webview)
+        self.pipelines.values().any(|(w, _)| *w == webview)
     }
 
     pub(crate) fn has_top_level(&self, webview: WebViewId) -> bool {
-        self.top.contains_key(&webview)
+        self.pipelines.values().any(|(w, top)| *w == webview && *top)
     }
+
+    /// そのパイプラインは、この子のもので、面が合っているか。
+    pub(crate) fn owns(&self, webview: WebViewId, pipeline: PipelineId) -> bool {
+        self.pipelines
+            .get(&pipeline)
+            .is_some_and(|(w, _)| *w == webview)
+    }
+}
+
+/// 子から constellation への要求を通してよいか。送り主として申告された `(面, パイプライン)` が、その子のものでなければ捨てる。
+/// iframe の新しいパイプラインは、子が作って名乗り始めるので、親パイプラインが子のものなら、ここで受け持ちに足す
+/// (constellation がメッセージを処理するより先に、新しいパイプラインの要求が届くため)。
+pub(crate) fn constellation_msg_allowed(
+    owned: &Owned,
+    msg: &(WebViewId, PipelineId, ScriptToConstellationMessage),
+) -> bool {
+    let (webview, pipeline, content) = msg;
+    // ログは、面・パイプラインに意味のない値(`TEST_*`)で送られる。
+    if matches!(content, ScriptToConstellationMessage::LogEntry(..)) {
+        return true;
+    }
+    let mut o = owned.lock().unwrap();
+    // ワーカーのグローバルは、面を持たないとき `TEST_WEBVIEW_ID` で名乗る。そのときは、パイプラインだけ見る。
+    let owned_by_sender = if *webview == TEST_WEBVIEW_ID {
+        o.pipelines.contains_key(pipeline)
+    } else {
+        o.owns(*webview, *pipeline)
+    };
+    if !owned_by_sender {
+        return false;
+    }
+    if let ScriptToConstellationMessage::ScriptNewIFrame(load) = content {
+        let info = &load.info;
+        if info.webview_id != *webview || !o.owns(info.webview_id, info.parent_pipeline_id) {
+            return false;
+        }
+        o.add(info.webview_id, info.new_pipeline_id, false);
+    }
+    true
+}
+
+/// 子から描画(`Paint`)への要求を通してよいか。面を持つものは、その子の面だけ。フォントや画像の更新は、面ごとの描画の単位
+/// (`PainterId`)が、その子の面のものだけ。親が自分で送るもの(フレーム木・新しい絵の知らせ)は、子からは通さない。
+/// システムのフォントは、親(WebRender)がパスを開くので、フォントらしいファイルで、ホーム・一時の場所などの外のものだけ。
+pub(crate) fn paint_msg_allowed(owned: &Owned, msg: &PaintMessage) -> bool {
+    use PaintMessage::*;
+    let o = owned.lock().unwrap();
+    match msg {
+        ChangeRunningAnimationsState(w, p, _) |
+        SetThrottled(w, p, _) |
+        PipelineExited(w, p, _) |
+        GenerateImageKeysForPipeline(w, p) |
+        DelayNewFrameForCanvas(w, p, ..) |
+        UpdateEpoch {
+            webview_id: w,
+            pipeline_id: p,
+            ..
+        } => o.owns_recent(*w, *p),
+        SendInitialTransaction(w, _) |
+        ScrollNodeByDelta(w, ..) |
+        ScrollViewportByDelta(w, _) |
+        SendDisplayList { webview_id: w, .. } |
+        GenerateImageKey(w, _) |
+        Viewport(w, _) |
+        ScreenshotReadinessReponse(w, _) => o.has(*w),
+        UpdateImages(painter, _) |
+        GenerateFontKeys(.., painter) |
+        AddFont(painter, ..) |
+        AddFontInstance(painter, ..) |
+        RemoveFonts(painter, ..) => o.has_painter(*painter),
+        GenerateFrame(painters) => painters.iter().all(|p| o.has_painter(*p)),
+        AddSystemFont(painter, _, handle) => {
+            o.has_painter(*painter) && system_font_path_allowed(std::path::Path::new(&handle.path))
+        },
+        CollectMemoryReport(_) => true,
+        SetFrameTreeForWebView(..) | NewWebRenderFrameReady(..) => false,
+    }
+}
+
+/// 親(WebRender)が開いてよいシステムのフォントのパスか:絶対パスで、`..` を含まず、フォントの拡張子で、
+/// 利用者のデータ・一時・システムの情報の場所(`/home`・`/root`・`/tmp`・`/var/tmp`・`/proc`・`/sys`・`/dev`・`/run`)の外。
+fn system_font_path_allowed(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    const DENIED: &[&str] = &["home", "root", "tmp", "var/tmp", "proc", "sys", "dev", "run"];
+    let rel = path.strip_prefix("/").unwrap_or(path);
+    if DENIED.iter().any(|d| rel.starts_with(d)) {
+        return false;
+    }
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "ttf" | "otf" | "ttc" | "otc" | "woff" | "woff2" | "pfb" | "pfa" | "pcf" | "gz"
+        )
+    })
 }
 
 /// 子から埋め込み側(コンポジタ)への通知を通してよいか。面を持つメッセージは、その子がパイプラインを持つ面のものだけ。
@@ -256,6 +362,70 @@ mod tests {
     }
     fn key(h: &str) -> String {
         site_key_with(h, fake_registrable)
+    }
+
+    fn ids() -> (WebViewId, PipelineId) {
+        use servo_base::id::{PainterId, PipelineNamespace, PipelineNamespaceId};
+        thread_local!(static INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+        if !INSTALLED.with(|i| i.replace(true)) {
+            PipelineNamespace::install(PipelineNamespaceId(7));
+        }
+        (WebViewId::new(PainterId::next()), PipelineId::new())
+    }
+
+    #[test]
+    fn a_child_only_owns_the_pipelines_and_views_it_was_given() {
+        let (w1, p1) = ids();
+        let (w2, p2) = ids();
+        let mut o = OwnedViews::default();
+        o.add(w1, p1, true);
+        assert!(o.owns(w1, p1) && o.has(w1) && o.has_top_level(w1));
+        // 別の子の面・パイプライン、食い違う組み合わせは、受け持たない。
+        assert!(!o.owns(w2, p2) && !o.owns(w1, p2) && !o.owns(w2, p1) && !o.has(w2));
+        // iframe のパイプラインは、最上位の印が付かない。面を持っていても、最上位のページは持たない。
+        let (w3, p3) = ids();
+        o.add(w3, p3, false);
+        assert!(o.has(w3) && !o.has_top_level(w3));
+        o.remove(p1);
+        assert!(!o.has(w1) && !o.owns(w1, p1));
+    }
+
+    #[test]
+    fn system_font_paths_must_look_like_fonts_outside_user_and_system_info_dirs() {
+        use std::path::Path;
+        assert!(system_font_path_allowed(Path::new("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")));
+        assert!(system_font_path_allowed(Path::new("/nix/store/x/Noto.OTC")));
+        assert!(!system_font_path_allowed(Path::new("/home/u/.local/share/kyousei/store.db")));
+        assert!(!system_font_path_allowed(Path::new("/home/u/font.ttf")));
+        assert!(!system_font_path_allowed(Path::new("/proc/self/mem")));
+        assert!(!system_font_path_allowed(Path::new("/usr/share/fonts/../../etc/shadow.ttf")));
+        assert!(!system_font_path_allowed(Path::new("relative/font.ttf")));
+        assert!(!system_font_path_allowed(Path::new("/etc/passwd")));
+    }
+
+    #[test]
+    fn a_retired_pipeline_is_still_accepted_for_its_exit_notice() {
+        let (w1, p1) = ids();
+        let mut o = OwnedViews::default();
+        o.add(w1, p1, true);
+        o.remove(p1);
+        assert!(!o.owns(w1, p1) && o.owns_recent(w1, p1));
+        let (w2, _) = ids();
+        assert!(!o.owns_recent(w2, p1));
+    }
+
+    #[test]
+    fn embedder_messages_for_other_views_are_dropped() {
+        let (w1, p1) = ids();
+        let (w2, _) = ids();
+        let owned = Owned::default();
+        owned.lock().unwrap().add(w1, p1, true);
+        assert!(embedder_msg_allowed(&owned, &EmbedderMsg::ClearClipboard(w1)));
+        assert!(!embedder_msg_allowed(&owned, &EmbedderMsg::ClearClipboard(w2)));
+        assert!(!embedder_msg_allowed(
+            &owned,
+            &EmbedderMsg::OnDevtoolsStarted(Err(()), String::new())
+        ));
     }
 
     #[test]
