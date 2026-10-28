@@ -89,6 +89,10 @@ impl Buffer for GStreamerBuffer {
         let data = self.frame.plane_data(0).ok()?;
         Some(VideoFrameData::Raw(Arc::new(data.to_vec())))
     }
+
+    fn as_bytes(&self) -> Option<&[u8]> {
+        self.frame.plane_data(0).ok()
+    }
 }
 
 pub struct GStreamerRender {
