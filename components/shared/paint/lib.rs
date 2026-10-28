@@ -41,7 +41,7 @@ pub use webrender_api::ExternalImageSource;
 use webrender_api::units::{DevicePixel, LayoutVector2D, TexelRect};
 use webrender_api::{
     BuiltDisplayList, BuiltDisplayListDescriptor, ExternalImage, ExternalImageData,
-    ExternalImageHandler, ExternalImageId, ExternalScrollId, FontInstanceFlags, FontInstanceKey,
+    ExternalImageHandler, ExternalImageId, ExternalImageType, ExternalScrollId, FontInstanceFlags, FontInstanceKey,
     FontKey, ImageData, ImageDescriptor, ImageKey, NativeFontHandle,
     PipelineId as WebRenderPipelineId,
 };
@@ -595,6 +595,62 @@ impl WebRenderExternalImageIdManager {
     }
 }
 
+/// Ids at or above this value name images in [`SharedImageBuffers`] (the ids of the other external
+/// images are small counters from [`WebRenderExternalImageIdManager`]).
+const SHARED_BUFFER_ID_BASE: u64 = 1 << 62;
+/// How many of the latest frames of one image are kept: WebRender asks for the bytes (`lock`) when it
+/// renders, which can be a frame or two after the update was sent.
+const SHARED_BUFFERS_KEPT_PER_IMAGE: usize = 8;
+
+#[derive(Default)]
+struct SharedImageBuffersInner {
+    next_id: u64,
+    by_id: FxHashMap<u64, Arc<GenericSharedMemory>>,
+    by_key: FxHashMap<ImageKey, std::collections::VecDeque<u64>>,
+}
+
+/// Images that arrived in shared memory from another process (video frames), which WebRender reads
+/// in place (`ExternalImageType::Buffer`) instead of the painter first copying them into a `Vec`.
+#[derive(Clone, Default)]
+pub struct SharedImageBuffers(Arc<Mutex<SharedImageBuffersInner>>);
+
+impl SharedImageBuffers {
+    /// Keep `memory` as the newest bytes of image `key` and return the external image to give WebRender.
+    pub fn publish(&self, key: ImageKey, memory: GenericSharedMemory) -> ExternalImageData {
+        let mut inner = self.0.lock().unwrap();
+        inner.next_id += 1;
+        let id = SHARED_BUFFER_ID_BASE + inner.next_id;
+        inner.by_id.insert(id, Arc::new(memory));
+        let mut dropped = vec![];
+        let ids = inner.by_key.entry(key).or_default();
+        ids.push_back(id);
+        while ids.len() > SHARED_BUFFERS_KEPT_PER_IMAGE {
+            dropped.extend(ids.pop_front());
+        }
+        for id in dropped {
+            inner.by_id.remove(&id);
+        }
+        ExternalImageData {
+            id: ExternalImageId(id),
+            channel_index: 0,
+            image_type: ExternalImageType::Buffer,
+            normalized_uvs: false,
+        }
+    }
+
+    /// The image `key` was deleted.
+    pub fn forget(&self, key: ImageKey) {
+        let mut inner = self.0.lock().unwrap();
+        for id in inner.by_key.remove(&key).unwrap_or_default() {
+            inner.by_id.remove(&id);
+        }
+    }
+
+    fn get(&self, id: u64) -> Option<Arc<GenericSharedMemory>> {
+        self.0.lock().unwrap().by_id.get(&id).cloned()
+    }
+}
+
 /// WebRender External Image Handler implementation.
 pub struct WebRenderExternalImageHandlers {
     /// WebGL handler.
@@ -607,6 +663,10 @@ pub struct WebRenderExternalImageHandlers {
     /// This is shared with the WebGL, WebGPU, and hardware-accelerated media threads and
     /// all other instances of [`WebRenderExternalImageHandlers`] -- one per WebRender instance.
     id_manager: WebRenderExternalImageIdManager,
+    /// Images read in place from shared memory.
+    shared_buffers: SharedImageBuffers,
+    /// The shared-memory images WebRender has locked (and not yet unlocked).
+    locked_buffers: FxHashMap<u64, Arc<GenericSharedMemory>>,
 }
 
 impl WebRenderExternalImageHandlers {
@@ -616,7 +676,13 @@ impl WebRenderExternalImageHandlers {
             media_handler: Default::default(),
             webgpu_handler: Default::default(),
             id_manager,
+            shared_buffers: Default::default(),
+            locked_buffers: Default::default(),
         }
+    }
+
+    pub fn shared_buffers(&self) -> SharedImageBuffers {
+        self.shared_buffers.clone()
     }
 
     pub fn id_manager(&self) -> WebRenderExternalImageIdManager {
@@ -647,6 +713,22 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
         _channel_index: u8,
         _is_composited: bool,
     ) -> ExternalImage<'_> {
+        if key.0 >= SHARED_BUFFER_ID_BASE {
+            let memory = self.shared_buffers.get(key.0);
+            return match memory {
+                Some(memory) => {
+                    let memory = self.locked_buffers.entry(key.0).or_insert(memory);
+                    ExternalImage {
+                        uv: TexelRect::new(0.0, 0.0, 0.0, 0.0),
+                        source: ExternalImageSource::RawData(&memory[..]),
+                    }
+                },
+                None => ExternalImage {
+                    uv: TexelRect::new(0.0, 0.0, 0.0, 0.0),
+                    source: ExternalImageSource::Invalid,
+                },
+            };
+        }
         let Some(handler_type) = self.id_manager().get(&key) else {
             // The image was already removed (for example, its video player was unregistered
             // while WebRender still draws a frame that refers to it): draw nothing.
@@ -698,6 +780,10 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
     /// Unlock the external image. The WR should not read the image
     /// content after this call.
     fn unlock(&mut self, key: ExternalImageId, _channel_index: u8) {
+        if key.0 >= SHARED_BUFFER_ID_BASE {
+            self.locked_buffers.remove(&key.0);
+            return;
+        }
         let Some(handler_type) = self.id_manager().get(&key) else {
             return;
         };
