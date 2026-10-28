@@ -4,6 +4,8 @@
 
 //! The interface to the `paint` crate, which helps to break dependency cycles.
 
+pub mod dmabuf;
+
 use std::collections::HashMap;
 use std::fmt::{Debug, Error, Formatter};
 
@@ -667,6 +669,10 @@ pub struct WebRenderExternalImageHandlers {
     shared_buffers: SharedImageBuffers,
     /// The shared-memory images WebRender has locked (and not yet unlocked).
     locked_buffers: FxHashMap<u64, Arc<GenericSharedMemory>>,
+    /// The GL API of the rendering context, to import dmabufs.
+    gl: Option<std::rc::Rc<dyn gleam::gl::Gl>>,
+    /// The dmabuf frames imported as textures for WebRender, until it unlocks them.
+    imported_dmabufs: FxHashMap<u64, dmabuf::ImportedTexture>,
 }
 
 impl WebRenderExternalImageHandlers {
@@ -678,7 +684,14 @@ impl WebRenderExternalImageHandlers {
             id_manager,
             shared_buffers: Default::default(),
             locked_buffers: Default::default(),
+            gl: None,
+            imported_dmabufs: Default::default(),
         }
+    }
+
+    /// The GL API to import dmabufs with (video frames from content processes).
+    pub fn set_gl(&mut self, gl: std::rc::Rc<dyn gleam::gl::Gl>) {
+        self.gl = Some(gl);
     }
 
     pub fn shared_buffers(&self) -> SharedImageBuffers {
@@ -713,6 +726,31 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
         _channel_index: u8,
         _is_composited: bool,
     ) -> ExternalImage<'_> {
+        if (dmabuf::DMABUF_ID_BASE..dmabuf::DMABUF_ID_END).contains(&key.0) {
+            let imported = self.gl.as_ref().and_then(|gl| {
+                let frame = dmabuf::frame_of(key.0)?;
+                let imported = dmabuf::import(&**gl, &frame)?;
+                Some((imported, frame.width, frame.height))
+            });
+            return match imported {
+                Some((imported, width, height)) => {
+                    let texture = imported.texture;
+                    if let Some(old) = self.imported_dmabufs.insert(key.0, imported) {
+                        if let Some(gl) = self.gl.as_ref() {
+                            dmabuf::destroy(&**gl, old);
+                        }
+                    }
+                    ExternalImage {
+                        uv: TexelRect::new(0.0, 0.0, width as f32, height as f32),
+                        source: ExternalImageSource::NativeTexture(texture),
+                    }
+                },
+                None => ExternalImage {
+                    uv: TexelRect::new(0.0, 0.0, 0.0, 0.0),
+                    source: ExternalImageSource::Invalid,
+                },
+            };
+        }
         if key.0 >= SHARED_BUFFER_ID_BASE {
             let memory = self.shared_buffers.get(key.0);
             return match memory {
@@ -780,6 +818,12 @@ impl ExternalImageHandler for WebRenderExternalImageHandlers {
     /// Unlock the external image. The WR should not read the image
     /// content after this call.
     fn unlock(&mut self, key: ExternalImageId, _channel_index: u8) {
+        if (dmabuf::DMABUF_ID_BASE..dmabuf::DMABUF_ID_END).contains(&key.0) {
+            if let (Some(imported), Some(gl)) = (self.imported_dmabufs.remove(&key.0), self.gl.as_ref()) {
+                dmabuf::destroy(&**gl, imported);
+            }
+            return;
+        }
         if key.0 >= SHARED_BUFFER_ID_BASE {
             self.locked_buffers.remove(&key.0);
             return;
@@ -855,6 +899,8 @@ pub enum SerializableImageData {
     /// An image owned by the embedding, and referenced by WebRender. This may
     /// take the form of a texture or a heap-allocated buffer.
     External(ExternalImageData),
+    /// A video frame in a dmabuf, which the content process sent on the side (see [`dmabuf`]).
+    DmaBuf(dmabuf::DmaBufRef),
 }
 
 impl From<SerializableImageData> for ImageData {
@@ -864,6 +910,9 @@ impl From<SerializableImageData> for ImageData {
                 ImageData::Raw(shared_memory.into_arc_vec())
             },
             SerializableImageData::External(image) => ImageData::External(image),
+            // The painter turns these into external images (it knows the image key); a frame that
+            // gets here is not drawn.
+            SerializableImageData::DmaBuf(_) => ImageData::Raw(Arc::new(vec![0; 4])),
         }
     }
 }

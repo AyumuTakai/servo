@@ -14,6 +14,8 @@ pub enum VideoFrameData {
     /// NV12 (a luma plane, then an interleaved chroma plane at half the width and height); the planes
     /// stay in the backend's buffer (`Buffer::nv12_planes`).
     Nv12(Nv12Info),
+    /// A dmabuf (the descriptor stays in the backend's buffer; `Buffer::dmabuf`).
+    DmaBuf,
     Texture(u32),
     OESTexture(u32),
 }
@@ -38,11 +40,27 @@ pub struct Nv12Info {
     pub full_range: bool,
 }
 
+/// A frame that lives in GPU memory as a dmabuf (one plane), which another process can import.
+#[derive(Clone, Copy, Debug)]
+pub struct DmaBufInfo {
+    /// The descriptor, which belongs to the buffer (do not close it).
+    pub fd: i32,
+    pub fourcc: u32,
+    pub pitch: u32,
+    pub offset: u32,
+    pub modifier: u64,
+}
+
 pub trait Buffer: Send + Sync {
     fn to_vec(&self) -> Option<VideoFrameData>;
 
     /// The pixels of a raw frame, if the backend can lend them without copying.
     fn as_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// The dmabuf the frame lives in, if it does.
+    fn dmabuf(&self) -> Option<DmaBufInfo> {
         None
     }
 
@@ -63,7 +81,9 @@ pub struct VideoFrame {
 
 impl VideoFrame {
     pub fn new(width: i32, height: i32, buffer: Arc<dyn Buffer>) -> Option<Self> {
-        let data = if let Some((_, _, info)) = buffer.nv12_planes() {
+        let data = if buffer.dmabuf().is_some() {
+            VideoFrameData::DmaBuf
+        } else if let Some((_, _, info)) = buffer.nv12_planes() {
             VideoFrameData::Nv12(info)
         } else if buffer.as_bytes().is_some() {
             VideoFrameData::Mapped
@@ -93,6 +113,11 @@ impl VideoFrame {
                 Arc::new(self._buffer.as_bytes().unwrap_or_default().to_vec())
             },
             VideoFrameData::Nv12(_) => Arc::new(self.nv12_to_bgra()),
+            // The pixels are in GPU memory and are not read back (a still of such a video is black).
+            VideoFrameData::DmaBuf => Arc::new(vec![
+                0;
+                self.width.max(0) as usize * self.height.max(0) as usize * 4
+            ]),
             _ => unreachable!("invalid raw data request for texture frame"),
         }
     }
@@ -101,6 +126,14 @@ impl VideoFrame {
     pub fn mapped_bytes(&self) -> Option<&[u8]> {
         match self.data {
             VideoFrameData::Mapped => self._buffer.as_bytes(),
+            _ => None,
+        }
+    }
+
+    /// The dmabuf of a frame that lives in GPU memory.
+    pub fn dmabuf(&self) -> Option<DmaBufInfo> {
+        match self.data {
+            VideoFrameData::DmaBuf => self._buffer.dmabuf(),
             _ => None,
         }
     }

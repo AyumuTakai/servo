@@ -168,6 +168,9 @@ impl Painter {
 
         let id_manager = paint.webrender_external_image_id_manager();
         let mut external_image_handlers = Box::new(WebRenderExternalImageHandlers::new(id_manager));
+        // Video frames that content processes send as dmabufs (`SERVO_MEDIA_DMABUF_SOCKET`).
+        external_image_handlers.set_gl(webrender_gl.clone());
+        paint_api::dmabuf::start_receiver_from_env();
 
         // Set WebRender external image handler for WebGL textures.
         #[cfg(feature = "webgl")]
@@ -1102,6 +1105,19 @@ impl Painter {
                 ImageData::Raw(data)
             },
             SerializableImageData::External(image) => ImageData::External(image),
+            SerializableImageData::DmaBuf(reference) => self.dmabuf_image_data(key, &reference),
+        }
+    }
+
+    /// The external image for a video frame a content process sent as a dmabuf. If the frame does not
+    /// arrive, nothing is drawn for it.
+    fn dmabuf_image_data(&mut self, key: ImageKey, reference: &paint_api::dmabuf::DmaBufRef) -> ImageData {
+        match paint_api::dmabuf::take_frame(reference, std::time::Duration::from_millis(100)) {
+            Some(frame) => ImageData::External(paint_api::dmabuf::publish(key, frame)),
+            None => {
+                warn!("dmabuf frame {} did not arrive", reference.frame_id);
+                ImageData::Raw(Arc::new(vec![0; (reference.width as usize) * (reference.height as usize) * 4]))
+            },
         }
     }
 
@@ -1126,6 +1142,7 @@ impl Painter {
                     self.frame_delayer.delete_image(key);
                     self.animation_image_cache.remove(&key);
                     self.shared_buffers.forget(key);
+                    paint_api::dmabuf::forget(key);
                 },
                 ImageUpdate::UpdateImage(key, desc, data, epoch) => {
                     if let Some(epoch) = epoch {
@@ -1138,6 +1155,9 @@ impl Painter {
                             if memory.is_ipc() && memory.len() >= SHARED_BUFFER_MIN_BYTES =>
                         {
                             ImageData::External(self.shared_buffers.publish(key, memory))
+                        },
+                        SerializableImageData::DmaBuf(reference) => {
+                            self.dmabuf_image_data(key, &reference)
                         },
                         data => data.into(),
                     };
