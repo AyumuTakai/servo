@@ -17,6 +17,7 @@ mod embedder;
 mod event_loop;
 mod logging;
 mod net_guard;
+mod storage_guard;
 mod pipeline;
 #[cfg(feature = "multiprocess")]
 mod process_manager;
