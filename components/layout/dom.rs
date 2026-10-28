@@ -518,6 +518,7 @@ impl<'dom> NodeExt<'dom> for ServoLayoutNode<'dom> {
         Some((
             VideoInfo {
                 image_key: data.current_frame.map(|frame| frame.image_key),
+                yuv: data.current_frame.and_then(|frame| frame.yuv),
                 poster_url: data.poster_url,
             },
             natural_size,

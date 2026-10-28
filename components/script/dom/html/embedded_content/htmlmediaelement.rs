@@ -22,7 +22,7 @@ use http::StatusCode;
 use http::header::HeaderMap;
 use js::context::{JSContext, NoGC};
 use js::realm::CurrentRealm;
-use layout_api::MediaFrame;
+use layout_api::{MediaFrame, YuvFrame, YuvMatrixKind};
 use media::{GLPlayerMsg, GLPlayerMsgForward, WindowGLContext};
 use net_traits::request::{Destination, RequestId};
 use net_traits::{
@@ -40,7 +40,7 @@ use servo_base::generic_channel::{self, GenericCallback, GenericSharedMemory};
 use servo_base::id::WebViewId;
 use servo_config::pref;
 use servo_media::player::audio::AudioRenderer;
-use servo_media::player::video::{VideoFrame, VideoFrameRenderer};
+use servo_media::player::video::{VideoFrame, VideoFrameRenderer, YuvMatrix};
 use servo_media::player::{PlaybackState, Player, PlayerError, PlayerEvent, SeekLock, StreamType};
 use servo_media::{ClientContextId, ServoMedia, SupportsMediaType};
 use servo_url::ServoUrl;
@@ -204,6 +204,9 @@ pub(crate) struct MediaFrameRenderer {
     old_frame: Option<ImageKey>,
     very_old_frame: Option<ImageKey>,
     current_frame_holder: Option<FrameHolder>,
+    /// The chroma planes of `old_frame` and `very_old_frame` (NV12 frames).
+    old_uv_frame: Option<ImageKey>,
+    very_old_uv_frame: Option<ImageKey>,
     /// <https://html.spec.whatwg.org/multipage/#poster-frame>
     poster_frame: Option<MediaFrame>,
 }
@@ -224,6 +227,8 @@ impl MediaFrameRenderer {
             old_frame: None,
             very_old_frame: None,
             current_frame_holder: None,
+            old_uv_frame: None,
+            very_old_uv_frame: None,
             poster_frame: None,
         }
     }
@@ -314,6 +319,16 @@ impl MediaFrameRenderer {
 
         if let Some(current_frame) = self.current_frame.take() {
             updates.push(ImageUpdate::DeleteImage(current_frame.image_key));
+            if let Some(yuv) = current_frame.yuv {
+                updates.push(ImageUpdate::DeleteImage(yuv.uv_image_key));
+            }
+        }
+
+        for uv_key in [self.old_uv_frame.take(), self.very_old_uv_frame.take()]
+            .into_iter()
+            .flatten()
+        {
+            updates.push(ImageUpdate::DeleteImage(uv_key));
         }
 
         if let Some(old_image_key) = self.old_frame.take() {
@@ -330,12 +345,117 @@ impl MediaFrameRenderer {
         }
     }
 
+    /// Draws an NV12 frame: the luma plane and the chroma plane are two images (one shared memory
+    /// holds both), and WebRender converts to RGB on the GPU.
+    fn render_nv12(&mut self, frame: VideoFrame) {
+        let Some((y_plane, uv_plane, info)) = frame.nv12_planes() else {
+            return;
+        };
+        let (width, height) = (frame.get_width(), frame.get_height());
+        let (chroma_width, chroma_height) = ((width + 1) / 2, (height + 1) / 2);
+        let memory = GenericSharedMemory::from_parts(&[y_plane, uv_plane]);
+        let y_descriptor = ImageDescriptor {
+            format: ImageFormat::R8,
+            size: webrender_api::units::DeviceIntSize::new(width, height),
+            stride: Some(info.y_stride),
+            offset: 0,
+            flags: ImageDescriptorFlags::IS_OPAQUE,
+        };
+        let uv_descriptor = ImageDescriptor {
+            format: ImageFormat::RG8,
+            size: webrender_api::units::DeviceIntSize::new(chroma_width, chroma_height),
+            stride: Some(info.uv_stride),
+            offset: y_plane.len() as i32,
+            flags: ImageDescriptorFlags::IS_OPAQUE,
+        };
+        let matrix = match info.matrix {
+            YuvMatrix::Bt601 => YuvMatrixKind::Rec601,
+            YuvMatrix::Bt709 => YuvMatrixKind::Rec709,
+            YuvMatrix::Bt2020 => YuvMatrixKind::Rec2020,
+        };
+
+        let mut updates = smallvec::smallvec![];
+        if let Some(key) = mem::replace(&mut self.very_old_frame, self.old_frame.take()) {
+            updates.push(ImageUpdate::DeleteImage(key));
+        }
+        if let Some(key) = mem::replace(&mut self.very_old_uv_frame, self.old_uv_frame.take()) {
+            updates.push(ImageUpdate::DeleteImage(key));
+        }
+
+        match self.current_frame {
+            Some(MediaFrame {
+                image_key,
+                width: current_width,
+                height: current_height,
+                yuv: Some(yuv),
+            }) if current_width == width &&
+                current_height == height &&
+                yuv.matrix == matrix &&
+                yuv.full_range == info.full_range =>
+            {
+                updates.push(ImageUpdate::UpdateImage(
+                    image_key,
+                    y_descriptor,
+                    SerializableImageData::Raw(memory.clone()),
+                    None,
+                ));
+                updates.push(ImageUpdate::UpdateImage(
+                    yuv.uv_image_key,
+                    uv_descriptor,
+                    SerializableImageData::Raw(memory),
+                    None,
+                ));
+            },
+            _ => {
+                if let Some(current) = self.current_frame.take() {
+                    self.old_frame = Some(current.image_key);
+                    self.old_uv_frame = current.yuv.map(|yuv| yuv.uv_image_key);
+                }
+                let Some(y_key) = self.paint_api.generate_image_key_blocking(self.webview_id)
+                else {
+                    return;
+                };
+                let Some(uv_key) = self.paint_api.generate_image_key_blocking(self.webview_id)
+                else {
+                    return;
+                };
+                self.current_frame = Some(MediaFrame {
+                    image_key: y_key,
+                    width,
+                    height,
+                    yuv: Some(YuvFrame {
+                        uv_image_key: uv_key,
+                        matrix,
+                        full_range: info.full_range,
+                    }),
+                });
+                updates.push(ImageUpdate::AddImage(
+                    y_key,
+                    y_descriptor,
+                    SerializableImageData::Raw(memory.clone()),
+                    false,
+                ));
+                updates.push(ImageUpdate::AddImage(
+                    uv_key,
+                    uv_descriptor,
+                    SerializableImageData::Raw(memory),
+                    false,
+                ));
+            },
+        }
+        // WebRender does not build a new frame for an updated image unless it is told (see `render`).
+        self.current_frame_holder = None;
+        self.paint_api
+            .update_images(self.webview_id.into(), updates);
+    }
+
     fn set_poster_frame(&mut self, image: Option<Arc<RasterImage>>) {
         self.poster_frame = image.and_then(|image| {
             image.id.map(|image_key| MediaFrame {
                 image_key,
                 width: image.metadata.width as i32,
                 height: image.metadata.height as i32,
+                yuv: None,
             })
         });
     }
@@ -352,6 +472,35 @@ impl VideoFrameRenderer for MediaFrameRenderer {
         if self.player_id.is_none() ||
             (frame.is_gl_texture() && self.glplayer_id.read().unwrap().is_none())
         {
+            return;
+        }
+
+        // The images of a frame are the luma and chroma planes (NV12) or one BGRA image: when the kind
+        // changes, the current images are retired (kept two frames, like replaced ones) and new ones made.
+        let is_nv12 = frame.nv12_planes().is_some();
+        if self
+            .current_frame
+            .is_some_and(|current| current.yuv.is_some() != is_nv12)
+        {
+            if let Some(current) = self.current_frame.take() {
+                let mut updates = smallvec::smallvec![];
+                if let Some(old_image_key) = self.old_frame.replace(current.image_key) {
+                    updates.push(ImageUpdate::DeleteImage(old_image_key));
+                }
+                if let Some(yuv) = current.yuv {
+                    if let Some(old_uv) = self.old_uv_frame.replace(yuv.uv_image_key) {
+                        updates.push(ImageUpdate::DeleteImage(old_uv));
+                    }
+                }
+                if !updates.is_empty() {
+                    self.paint_api
+                        .update_images(self.webview_id.into(), updates);
+                }
+            }
+        }
+
+        if is_nv12 {
+            self.render_nv12(frame);
             return;
         }
 
@@ -471,6 +620,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                     image_key,
                     width: frame.get_width(),
                     height: frame.get_height(),
+                    yuv: None,
                 });
 
                 let image_data = self

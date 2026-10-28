@@ -67,6 +67,26 @@ impl GenericSharedMemory {
         }
     }
 
+    /// Build shared memory holding `parts` one after the other (one copy of each part).
+    pub fn from_parts(parts: &[&[u8]]) -> Self {
+        let total: usize = parts.iter().map(|part| part.len()).sum();
+        if use_ipc() {
+            let mut memory = IpcSharedMemory::from_byte(0, total);
+            #[expect(unsafe_code)]
+            let bytes = unsafe { memory.deref_mut() };
+            let mut at = 0;
+            for part in parts {
+                bytes[at..at + part.len()].copy_from_slice(part);
+                at += part.len();
+            }
+            GenericSharedMemory(GenericSharedMemoryVariant::Ipc(memory))
+        } else {
+            GenericSharedMemory(GenericSharedMemoryVariant::InProcess(Arc::new(
+                parts.concat(),
+            )))
+        }
+    }
+
     pub fn from_byte(data: u8, length: usize) -> Self {
         if use_ipc() {
             GenericSharedMemory(GenericSharedMemoryVariant::Ipc(IpcSharedMemory::from_byte(

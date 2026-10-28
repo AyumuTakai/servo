@@ -233,9 +233,28 @@ pub struct PendingRasterizationImage {
 
 #[derive(Clone, Copy, Debug, MallocSizeOf)]
 pub struct MediaFrame {
+    /// The image (the luma plane if the frame is `yuv`).
     pub image_key: webrender_api::ImageKey,
     pub width: i32,
     pub height: i32,
+    /// Set if the frame is NV12: `image_key` is the luma plane and WebRender converts to RGB.
+    pub yuv: Option<YuvFrame>,
+}
+
+/// What WebRender needs, beside the luma plane, to draw an NV12 video frame.
+#[derive(Clone, Copy, Debug, MallocSizeOf)]
+pub struct YuvFrame {
+    /// The interleaved chroma plane.
+    pub uv_image_key: webrender_api::ImageKey,
+    pub matrix: YuvMatrixKind,
+    pub full_range: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, MallocSizeOf, PartialEq)]
+pub enum YuvMatrixKind {
+    Rec601,
+    Rec709,
+    Rec2020,
 }
 
 pub struct MediaMetadata {

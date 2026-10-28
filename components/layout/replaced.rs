@@ -9,7 +9,9 @@ use app_units::{Au, MAX_AU};
 use data_url::DataUrl;
 use embedder_traits::ViewportDetails;
 use euclid::{Scale, Size2D};
-use layout_api::{IFrameSize, LayoutElement, LayoutImageDestination, LayoutNode, SVGElementData};
+use layout_api::{
+    IFrameSize, LayoutElement, LayoutImageDestination, LayoutNode, SVGElementData, YuvFrame,
+};
 use malloc_size_of_derive::MallocSizeOf;
 use net_traits::image_cache::{Image, ImageOrMetadataAvailable, VectorImage};
 use net_traits::request::InternalRequest;
@@ -147,6 +149,7 @@ pub(crate) struct ImageInfo {
 #[derive(Debug, MallocSizeOf)]
 pub(crate) struct VideoInfo {
     pub image_key: Option<ImageKey>,
+    pub yuv: Option<YuvFrame>,
     pub poster_url: Option<ServoUrl>,
 }
 
@@ -550,6 +553,7 @@ impl ReplacedContents {
                         selected_style: self.selected_style.clone(),
                         clip,
                         image_key: Some(image_key),
+                        yuv: None,
                         showing_broken_image_icon: image_info.showing_broken_image_icon,
                         url: image_info.url.clone(),
                         natural_width: self.natural_size.width,
@@ -566,6 +570,7 @@ impl ReplacedContents {
                     selected_style: self.selected_style.clone(),
                     clip,
                     image_key: video_info.image_key,
+                    yuv: video_info.yuv,
                     showing_broken_image_icon: false,
                     url: video_info.poster_url.clone(),
                     natural_width: self.natural_size.width,
@@ -612,6 +617,7 @@ impl ReplacedContents {
                     selected_style: self.selected_style.clone(),
                     clip,
                     image_key: Some(image_key),
+                    yuv: None,
                     showing_broken_image_icon: false,
                     url: None,
                     natural_width: self.natural_size.width,
@@ -631,6 +637,7 @@ impl ReplacedContents {
                         selected_style: self.selected_style.clone(),
                         clip,
                         image_key: Some(image_key),
+                        yuv: None,
                         showing_broken_image_icon: false,
                         url: None,
                         natural_width: self.natural_size.width,
