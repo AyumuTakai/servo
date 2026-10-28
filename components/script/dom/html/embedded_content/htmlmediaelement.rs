@@ -140,6 +140,15 @@ enum FrameStatus {
 }
 
 #[derive(MallocSizeOf)]
+/// The frame's pixels as shared memory. With a mapped frame the pixels are copied once, straight
+/// into the shared memory (no intermediate `Vec`).
+fn raw_frame_memory(frame: &VideoFrame) -> GenericSharedMemory {
+    match frame.mapped_bytes() {
+        Some(bytes) => GenericSharedMemory::from_bytes(bytes),
+        None => GenericSharedMemory::from_arc_vec(frame.get_data()),
+    }
+}
+
 struct FrameHolder(FrameStatus, VideoFrame);
 
 impl FrameHolder {
@@ -386,9 +395,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                             normalized_uvs: false,
                         })
                     },
-                    None => SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
-                        frame.get_data(),
-                    )),
+                    None => SerializableImageData::Raw(raw_frame_memory(&frame)),
                 };
                 updates.push(ImageUpdate::UpdateImage(
                     current_frame.image_key,
@@ -440,9 +447,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                         })
                     })
                     .unwrap_or_else(|| {
-                        SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
-                            frame.get_data(),
-                        ))
+                        SerializableImageData::Raw(raw_frame_memory(&frame))
                     });
 
                 self.current_frame_holder
@@ -488,9 +493,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                         })
                     })
                     .unwrap_or_else(|| {
-                        SerializableImageData::Raw(GenericSharedMemory::from_arc_vec(
-                            frame.get_data(),
-                        ))
+                        SerializableImageData::Raw(raw_frame_memory(&frame))
                     });
 
                 self.current_frame_holder = Some(FrameHolder::new(frame));

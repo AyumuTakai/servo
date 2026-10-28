@@ -9,12 +9,19 @@ use malloc_size_of_derive::MallocSizeOf;
 #[derive(Clone, MallocSizeOf)]
 pub enum VideoFrameData {
     Raw(#[conditional_malloc_size_of] Arc<Vec<u8>>),
+    /// The pixels stay in the backend's buffer (`Buffer::as_bytes`); no copy is made until they are used.
+    Mapped,
     Texture(u32),
     OESTexture(u32),
 }
 
 pub trait Buffer: Send + Sync {
     fn to_vec(&self) -> Option<VideoFrameData>;
+
+    /// The pixels of a raw frame, if the backend can lend them without copying.
+    fn as_bytes(&self) -> Option<&[u8]> {
+        None
+    }
 }
 
 #[derive(Clone, MallocSizeOf)]
@@ -28,7 +35,11 @@ pub struct VideoFrame {
 
 impl VideoFrame {
     pub fn new(width: i32, height: i32, buffer: Arc<dyn Buffer>) -> Option<Self> {
-        let data = buffer.to_vec()?;
+        let data = if buffer.as_bytes().is_some() {
+            VideoFrameData::Mapped
+        } else {
+            buffer.to_vec()?
+        };
         Some(VideoFrame {
             width,
             height,
@@ -48,7 +59,16 @@ impl VideoFrame {
     pub fn get_data(&self) -> Arc<Vec<u8>> {
         match self.data {
             VideoFrameData::Raw(ref data) => data.clone(),
+            VideoFrameData::Mapped => Arc::new(self._buffer.as_bytes().unwrap_or_default().to_vec()),
             _ => unreachable!("invalid raw data request for texture frame"),
+        }
+    }
+
+    /// The pixels of a raw frame without copying (frames the backend keeps mapped only).
+    pub fn mapped_bytes(&self) -> Option<&[u8]> {
+        match self.data {
+            VideoFrameData::Mapped => self._buffer.as_bytes(),
+            _ => None,
         }
     }
 
