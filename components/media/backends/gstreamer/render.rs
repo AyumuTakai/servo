@@ -131,6 +131,43 @@ impl GStreamerRender {
         }
     }
 
+    /// With hardware decoding kept (`SERVO_MEDIA_KEEP_VA`), converts the decoded frames to BGRA
+    /// on the GPU (`vapostproc ! appsink`) instead of `playsink`'s `videoconvert`, which converts on
+    /// the CPU (about 14 ms per 1080p frame on a low-end CPU, and the limit of the frame rate).
+    /// Returns false (nothing changed) if that is not possible.
+    fn set_va_converting_sink(pipeline: &gstreamer::Element, appsink: &gstreamer_app::AppSink) -> bool {
+        if std::env::var_os("SERVO_MEDIA_KEEP_VA").is_none() ||
+            std::env::var_os("SERVO_MEDIA_VA_CONVERT").is_some_and(|v| v == "0")
+        {
+            return false;
+        }
+        use gstreamer::prelude::*;
+        let build = || -> Option<gstreamer::Element> {
+            let post = gstreamer::ElementFactory::make("vapostproc").build().ok()?;
+            let bin = gstreamer::Bin::new();
+            bin.add_many([&post, appsink.upcast_ref::<gstreamer::Element>()]).ok()?;
+            post.link(appsink).ok()?;
+            let pad = gstreamer::GhostPad::with_target(&post.static_pad("sink")?).ok()?;
+            bin.add_pad(&pad).ok()?;
+            Some(bin.upcast())
+        };
+        let Some(bin) = build() else {
+            return false;
+        };
+        pipeline.set_property("video-sink", &bin);
+        // `playsink` would put its own `videoconvert` in front of the sink without this.
+        let flags = pipeline.property_value("flags");
+        if let Some(class) = glib::FlagsClass::with_type(flags.type_()) {
+            if let Some(flags) = class
+                .builder_with_value(flags)
+                .and_then(|builder| builder.set_by_nick("native-video").build())
+            {
+                pipeline.set_property_from_value("flags", &flags);
+            }
+        }
+        true
+    }
+
     pub fn setup_video_sink(
         &self,
         pipeline: &gstreamer::Element,
@@ -150,7 +187,9 @@ impl GStreamerRender {
                 .build();
 
             appsink.set_caps(Some(&caps));
-            pipeline.set_property("video-sink", &appsink);
+            if !Self::set_va_converting_sink(pipeline, &appsink) {
+                pipeline.set_property("video-sink", &appsink);
+            }
         };
 
         Ok(appsink)
