@@ -139,7 +139,6 @@ enum FrameStatus {
     Unlocked,
 }
 
-#[derive(MallocSizeOf)]
 /// The frame's pixels as shared memory. With a mapped frame the pixels are copied once, straight
 /// into the shared memory (no intermediate `Vec`).
 fn raw_frame_memory(frame: &VideoFrame) -> GenericSharedMemory {
@@ -149,6 +148,7 @@ fn raw_frame_memory(frame: &VideoFrame) -> GenericSharedMemory {
     }
 }
 
+#[derive(MallocSizeOf)]
 struct FrameHolder(FrameStatus, VideoFrame);
 
 impl FrameHolder {
