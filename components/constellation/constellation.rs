@@ -1034,6 +1034,8 @@ where
             Ok(event_loop) => event_loop,
             Err(error) => return self.handle_send_error(new_pipeline_id, error),
         };
+        // (Kyousei) このコンテンツプロセスが受け持つサイトに、新しいページの URL のホストを足す(`net_guard.rs`)。
+        crate::net_guard::add_site(&event_loop.sites, &load_data.url);
 
         let user_content_manager_id = self
             .webviews
@@ -1825,6 +1827,8 @@ where
             ScriptToConstellationMessage::SetFinalUrl(final_url) => {
                 // The script may have finished loading after we already started shutting down.
                 if let Some(ref mut pipeline) = self.pipelines.get_mut(&source_pipeline_id) {
+                    // (Kyousei) リダイレクトなどで、最終の URL のサイトが変わったら、受け持つサイトに足す。
+                    crate::net_guard::add_site(&pipeline.event_loop.sites, &final_url);
                     pipeline.url = final_url;
                 } else {
                     warn!("constellation got set final url message for dead pipeline");
