@@ -77,11 +77,12 @@ impl ProcessManager {
         let (mut process, _, event_loop_id) = self.processes.swap_remove(index);
         debug!("Removing process pid={}", process.pid());
         // Unregister this process system memory profiler
-        self.mem_profiler_chan
-            .send(ProfilerMsg::UnregisterReporter(format!(
-                "system-content-{}",
-                process.pid()
-            )));
+        if let Some(id) = event_loop_id {
+            self.mem_profiler_chan
+                .send(ProfilerMsg::UnregisterReporter(format!(
+                    "system-content-{id:?}"
+                )));
+        }
         process.wait();
         event_loop_id
     }
