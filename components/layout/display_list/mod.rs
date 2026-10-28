@@ -842,14 +842,34 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
         let common = self.common_properties(state, clip, &style);
 
         if let Some(image_key) = fragment.image_key {
-            self.wr().push_image(
-                &common,
-                rect,
-                image_rendering,
-                wr::AlphaType::PremultipliedAlpha,
-                image_key,
-                wr::ColorF::WHITE,
-            );
+            if let Some(yuv) = fragment.yuv {
+                self.wr().push_yuv_image(
+                    &common,
+                    rect,
+                    wr::YuvData::NV12(image_key, yuv.uv_image_key),
+                    wr::ColorDepth::Color8,
+                    match yuv.matrix {
+                        layout_api::YuvMatrixKind::Rec601 => wr::YuvColorSpace::Rec601,
+                        layout_api::YuvMatrixKind::Rec709 => wr::YuvColorSpace::Rec709,
+                        layout_api::YuvMatrixKind::Rec2020 => wr::YuvColorSpace::Rec2020,
+                    },
+                    if yuv.full_range {
+                        wr::ColorRange::Full
+                    } else {
+                        wr::ColorRange::Limited
+                    },
+                    image_rendering,
+                );
+            } else {
+                self.wr().push_image(
+                    &common,
+                    rect,
+                    image_rendering,
+                    wr::AlphaType::PremultipliedAlpha,
+                    image_key,
+                    wr::ColorF::WHITE,
+                );
+            }
 
             self.paint_timing_handler
                 .check_if_paintable(rect, style.clone_opacity());

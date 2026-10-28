@@ -170,6 +170,8 @@ pub(crate) struct ImageFragment {
     pub selected_style: SharedStyle,
     pub clip: PhysicalRect<Au>,
     pub image_key: Option<ImageKey>,
+    /// Set if `image_key` is the luma plane of an NV12 video frame.
+    pub yuv: Option<layout_api::YuvFrame>,
     pub showing_broken_image_icon: bool,
     pub url: Option<ServoUrl>,
     /// The intrinsic (natural) width of the image, if known.

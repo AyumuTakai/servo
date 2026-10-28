@@ -8,7 +8,7 @@ use glib::prelude::*;
 use servo_media_gstreamer_render::Render;
 use servo_media_player::PlayerError;
 use servo_media_player::context::PlayerGLContext;
-use servo_media_player::video::{Buffer, VideoFrame, VideoFrameData};
+use servo_media_player::video::{Buffer, Nv12Info, VideoFrame, VideoFrameData, YuvMatrix};
 
 #[cfg(any(
     target_os = "linux",
@@ -91,7 +91,34 @@ impl Buffer for GStreamerBuffer {
     }
 
     fn as_bytes(&self) -> Option<&[u8]> {
+        use gstreamer_video::prelude::VideoFrameExt;
+        if self.frame.format() == gstreamer_video::VideoFormat::Nv12 {
+            return None;
+        }
         self.frame.plane_data(0).ok()
+    }
+
+    fn nv12_planes(&self) -> Option<(&[u8], &[u8], Nv12Info)> {
+        use gstreamer_video::prelude::VideoFrameExt;
+        if self.frame.format() != gstreamer_video::VideoFormat::Nv12 {
+            return None;
+        }
+        let colorimetry = self.frame.info().colorimetry();
+        let matrix = match colorimetry.matrix() {
+            gstreamer_video::VideoColorMatrix::Bt601 => YuvMatrix::Bt601,
+            gstreamer_video::VideoColorMatrix::Bt709 => YuvMatrix::Bt709,
+            gstreamer_video::VideoColorMatrix::Bt2020 => YuvMatrix::Bt2020,
+            // Not said: the usual choice (HD is BT.709, SD is BT.601).
+            _ if self.frame.height() >= 720 => YuvMatrix::Bt709,
+            _ => YuvMatrix::Bt601,
+        };
+        let info = Nv12Info {
+            y_stride: self.frame.plane_stride()[0],
+            uv_stride: self.frame.plane_stride()[1],
+            matrix,
+            full_range: colorimetry.range() == gstreamer_video::VideoColorRange::Range0_255,
+        };
+        Some((self.frame.plane_data(0).ok()?, self.frame.plane_data(1).ok()?, info))
     }
 }
 
@@ -142,6 +169,16 @@ impl GStreamerRender {
             return false;
         }
         use gstreamer::prelude::*;
+        // `SERVO_MEDIA_NV12=1`: NV12 (1.5 bytes a pixel) goes on to WebRender, which converts it on the GPU.
+        // Off by default: on Intel (Alder Lake-N), downloading the decoded NV12 costs the CPU more than
+        // downloading the BGRA that `vapostproc` converts (child 69% -> 114%, parent 42% -> 55%).
+        if std::env::var_os("SERVO_MEDIA_NV12").is_some_and(|v| v == "1") {
+            let caps = gstreamer::Caps::builder("video/x-raw")
+                .field("format", gstreamer_video::VideoFormat::Nv12.to_str())
+                .field("pixel-aspect-ratio", gstreamer::Fraction::from((1, 1)))
+                .build();
+            appsink.set_caps(Some(&caps));
+        }
         let build = || -> Option<gstreamer::Element> {
             let post = gstreamer::ElementFactory::make("vapostproc").build().ok()?;
             let bin = gstreamer::Bin::new();
