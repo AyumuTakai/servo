@@ -1526,7 +1526,8 @@ fn register_system_memory_reporter_for_event_loop(
         .initial_script_state
         .memory_profiler_sender
         .send(ProfilerMsg::RegisterReporter(
-            format!("system-content-{}", std::process::id()),
+            // (Kyousei) 名前は、event loop の ID で一意にする(pid の名前空間の中では、子の pid が重なる)。
+            format!("system-content-{:?}", new_event_loop_info.initial_script_state.id),
             Reporter(callback),
         ));
 }
