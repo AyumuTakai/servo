@@ -1967,6 +1967,10 @@ where
                 self.handle_serviceworker_algorithm(source_pipeline_id, algorithm);
             },
             ScriptToConstellationMessage::ForwardDOMMessage(msg_vec, scope_url) => {
+                // (Kyousei) 上と同じ:無効なら捨てる。
+                if !pref!(dom_serviceworker_enabled) {
+                    return warn!("Dropped a service worker message: service workers are disabled");
+                }
                 if let Some(mgr) = self.sw_managers.get(&scope_url.origin()) {
                     let _ = mgr.send(ServiceWorkerMsg::ForwardDOMMessage(msg_vec, scope_url));
                 } else {
@@ -2555,6 +2559,11 @@ where
         pipeline_id: PipelineId,
         algorithm: ServiceWorkerAlgorithm,
     ) {
+        // (Kyousei) Service Worker が無効(既定)なら、子からの要求は受け付けない。設定は子の JS の API を隠すだけで、
+        // 乗っ取られた子は、直接このメッセージを送れる。受け付けると、検問のない net を持つマネージャのプロセスを起こされる。
+        if !pref!(dom_serviceworker_enabled) {
+            return warn!("Dropped a service worker request: service workers are disabled");
+        }
         let origin = match &algorithm {
             ServiceWorkerAlgorithm::StartRegister(job) => job.storage_key.clone(),
             ServiceWorkerAlgorithm::Unregister(job) => job.storage_key.clone(),
