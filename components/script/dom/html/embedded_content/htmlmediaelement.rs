@@ -148,6 +148,28 @@ fn raw_frame_memory(frame: &VideoFrame) -> GenericSharedMemory {
     }
 }
 
+/// The image data of a frame: its pixels in shared memory, or, for a frame in GPU memory (a dmabuf), only
+/// a reference to the frame, whose descriptor goes to the process that paints on the side.
+fn frame_image_data(frame: &VideoFrame) -> SerializableImageData {
+    if let Some(info) = frame.dmabuf() {
+        let sent = paint_api::dmabuf::send_frame(
+            info.fd,
+            frame.get_width() as u32,
+            frame.get_height() as u32,
+            info.fourcc,
+            info.pitch,
+            info.offset,
+            info.modifier,
+        );
+        return match sent {
+            Some(reference) => SerializableImageData::DmaBuf(reference),
+            // Not sent: a black frame.
+            None => SerializableImageData::Raw(raw_frame_memory(frame)),
+        };
+    }
+    SerializableImageData::Raw(raw_frame_memory(frame))
+}
+
 #[derive(MallocSizeOf)]
 struct FrameHolder(FrameStatus, VideoFrame);
 
@@ -207,6 +229,10 @@ pub(crate) struct MediaFrameRenderer {
     /// The chroma planes of `old_frame` and `very_old_frame` (NV12 frames).
     old_uv_frame: Option<ImageKey>,
     very_old_uv_frame: Option<ImageKey>,
+    /// The latest frames in GPU memory: the decoder must not reuse their buffers while the process that
+    /// paints may still read them.
+    #[ignore_malloc_size_of = "Difficult"]
+    dmabuf_hold: std::collections::VecDeque<VideoFrame>,
     /// <https://html.spec.whatwg.org/multipage/#poster-frame>
     poster_frame: Option<MediaFrame>,
 }
@@ -229,6 +255,7 @@ impl MediaFrameRenderer {
             current_frame_holder: None,
             old_uv_frame: None,
             very_old_uv_frame: None,
+            dmabuf_hold: Default::default(),
             poster_frame: None,
         }
     }
@@ -475,6 +502,13 @@ impl VideoFrameRenderer for MediaFrameRenderer {
             return;
         }
 
+        if frame.dmabuf().is_some() {
+            self.dmabuf_hold.push_back(frame.clone());
+            while self.dmabuf_hold.len() > 6 {
+                self.dmabuf_hold.pop_front();
+            }
+        }
+
         // The images of a frame are the luma and chroma planes (NV12) or one BGRA image: when the kind
         // changes, the current images are retired (kept two frames, like replaced ones) and new ones made.
         let is_nv12 = frame.nv12_planes().is_some();
@@ -544,7 +578,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                             normalized_uvs: false,
                         })
                     },
-                    None => SerializableImageData::Raw(raw_frame_memory(&frame)),
+                    None => frame_image_data(&frame),
                 };
                 updates.push(ImageUpdate::UpdateImage(
                     current_frame.image_key,
@@ -596,7 +630,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                         })
                     })
                     .unwrap_or_else(|| {
-                        SerializableImageData::Raw(raw_frame_memory(&frame))
+                        frame_image_data(&frame)
                     });
 
                 self.current_frame_holder
@@ -643,7 +677,7 @@ impl VideoFrameRenderer for MediaFrameRenderer {
                         })
                     })
                     .unwrap_or_else(|| {
-                        SerializableImageData::Raw(raw_frame_memory(&frame))
+                        frame_image_data(&frame)
                     });
 
                 self.current_frame_holder = Some(FrameHolder::new(frame));

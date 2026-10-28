@@ -8,7 +8,9 @@ use glib::prelude::*;
 use servo_media_gstreamer_render::Render;
 use servo_media_player::PlayerError;
 use servo_media_player::context::PlayerGLContext;
-use servo_media_player::video::{Buffer, Nv12Info, VideoFrame, VideoFrameData, YuvMatrix};
+use servo_media_player::video::{
+    Buffer, DmaBufInfo, Nv12Info, VideoFrame, VideoFrameData, YuvMatrix,
+};
 
 #[cfg(any(
     target_os = "linux",
@@ -80,6 +82,97 @@ mod platform {
     }
 }
 
+#[link(name = "gstallocators-1.0")]
+unsafe extern "C" {
+    fn gst_is_dmabuf_memory(mem: *mut gstreamer::ffi::GstMemory) -> glib::ffi::gboolean;
+    fn gst_dmabuf_memory_get_fd(mem: *mut gstreamer::ffi::GstMemory) -> std::os::raw::c_int;
+}
+
+/// A decoded frame in GPU memory (`video/x-raw(memory:DMABuf)`), which is never mapped.
+struct GStreamerDmaBuf {
+    #[allow(dead_code)]
+    buffer: gstreamer::Buffer,
+    info: DmaBufInfo,
+}
+
+impl Buffer for GStreamerDmaBuf {
+    fn to_vec(&self) -> Option<VideoFrameData> {
+        Some(VideoFrameData::DmaBuf)
+    }
+
+    fn dmabuf(&self) -> Option<DmaBufInfo> {
+        Some(self.info)
+    }
+}
+
+/// `drm-format` of the caps (`AR24:0x0100000000000002`): the fourcc and the modifier.
+fn parse_drm_format(text: &str) -> Option<(u32, u64)> {
+    let (fourcc, modifier) = match text.split_once(':') {
+        Some((fourcc, modifier)) => (
+            fourcc,
+            u64::from_str_radix(modifier.trim_start_matches("0x"), 16).ok()?,
+        ),
+        None => (text, 0),
+    };
+    let bytes = fourcc.as_bytes();
+    if bytes.len() != 4 {
+        return None;
+    }
+    Some((
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        modifier,
+    ))
+}
+
+fn dmabuf_frame_from_sample(sample: &gstreamer::Sample) -> Option<VideoFrame> {
+    use gstreamer_video::prelude::*;
+    let caps = sample.caps()?;
+    if !caps
+        .features(0)
+        .is_some_and(|features| features.contains("memory:DMABuf"))
+    {
+        return None;
+    }
+    let structure = caps.structure(0)?;
+    let width = structure.get::<i32>("width").ok()?;
+    let height = structure.get::<i32>("height").ok()?;
+    let (fourcc, modifier) = structure
+        .get::<&str>("drm-format")
+        .ok()
+        .and_then(parse_drm_format)
+        // ARGB8888: what `vapostproc` makes of BGRA.
+        .unwrap_or((u32::from_le_bytes(*b"AR24"), 0));
+    let buffer = sample.buffer_owned()?;
+    let fd = unsafe {
+        let memory = buffer.peek_memory(0).as_mut_ptr();
+        if gst_is_dmabuf_memory(memory) == 0 {
+            return None;
+        }
+        gst_dmabuf_memory_get_fd(memory)
+    };
+    if fd < 0 {
+        return None;
+    }
+    let (pitch, offset) = match buffer.meta::<gstreamer_video::VideoMeta>() {
+        Some(meta) => (meta.stride()[0] as u32, meta.offset()[0] as u32),
+        None => (width as u32 * 4, 0),
+    };
+    VideoFrame::new(
+        width,
+        height,
+        Arc::new(GStreamerDmaBuf {
+            buffer,
+            info: DmaBufInfo {
+                fd,
+                fourcc,
+                pitch,
+                offset,
+                modifier,
+            },
+        }),
+    )
+}
+
 struct GStreamerBuffer {
     frame: gstreamer_video::VideoFrame<gstreamer_video::video_frame::Readable>,
 }
@@ -145,6 +238,9 @@ impl GStreamerRender {
         if let Some(render) = self.render.as_ref() {
             render.build_frame(sample)
         } else {
+            if let Some(frame) = dmabuf_frame_from_sample(&sample) {
+                return Some(frame);
+            }
             let buffer = sample.buffer_owned()?;
             let caps = sample.caps()?;
             let info = gstreamer_video::VideoInfo::from_caps(caps).ok()?;
@@ -181,6 +277,77 @@ impl GStreamerRender {
         }
         let build = || -> Option<gstreamer::Element> {
             let post = gstreamer::ElementFactory::make("vapostproc").build().ok()?;
+            // `SERVO_MEDIA_DMABUF=1`: the frames stay in GPU memory as dmabufs, which the process that paints
+            // imports (nothing is read back by the CPU). Needs `SERVO_MEDIA_DMABUF_SOCKET` (the embedder sets
+            // it). The sink asks for the 4-byte RGB formats (with the modifiers) that `vapostproc` offers as
+            // dmabufs (it would give NV12, which has two planes); if there are none, or the negotiation fails,
+            // it gives BGRA in system memory as before.
+            if std::env::var_os("SERVO_MEDIA_DMABUF").is_some_and(|v| v == "1") &&
+                std::env::var_os("SERVO_MEDIA_DMABUF_SOCKET").is_some()
+            {
+                let mut formats: Vec<String> = vec![];
+                let offered = post.static_pad("src")?.query_caps(None);
+                for (structure, features) in offered.iter_with_features() {
+                    if !features.contains("memory:DMABuf") {
+                        continue;
+                    }
+                    if let Ok(list) = structure.get::<gstreamer::List>("drm-format") {
+                        for value in list.iter() {
+                            if let Ok(text) = value.get::<&str>() {
+                                if ["AR24", "XR24", "AB24", "XB24"]
+                                    .iter()
+                                    .any(|prefix| text.starts_with(prefix))
+                                {
+                                    formats.push(text.to_owned());
+                                }
+                            }
+                        }
+                    } else if let Ok(text) = structure.get::<&str>("drm-format") {
+                        if ["AR24", "XR24", "AB24", "XB24"]
+                            .iter()
+                            .any(|prefix| text.starts_with(prefix))
+                        {
+                            formats.push(text.to_owned());
+                        }
+                    }
+                }
+                if !formats.is_empty() {
+                    let mut caps = gstreamer::Caps::new_empty();
+                    {
+                        let caps = caps.get_mut().unwrap();
+                        caps.append_structure_full(
+                            gstreamer::Structure::builder("video/x-raw")
+                                .field("format", "DMA_DRM")
+                                .field(
+                                    "drm-format",
+                                    gstreamer::List::new(formats.iter().map(String::as_str)),
+                                )
+                                .build(),
+                            Some(gstreamer::CapsFeatures::new(["memory:DMABuf"])),
+                        );
+                        caps.append_structure(
+                            gstreamer::Structure::builder("video/x-raw")
+                                .field("format", gstreamer_video::VideoFormat::Bgra.to_str())
+                                .field("pixel-aspect-ratio", gstreamer::Fraction::from((1, 1)))
+                                .build(),
+                        );
+                    }
+                    appsink.set_caps(Some(&caps));
+                    // `vapostproc` gives dmabufs only to a sink that says it can take `VideoMeta` (the strides).
+                    if let Some(pad) = appsink.static_pad("sink") {
+                        pad.add_probe(gstreamer::PadProbeType::QUERY_DOWNSTREAM, |_, info| {
+                            if let Some(gstreamer::PadProbeData::Query(query)) = info.data.as_mut() {
+                                if let gstreamer::QueryViewMut::Allocation(allocation) =
+                                    query.view_mut()
+                                {
+                                    allocation.add_allocation_meta::<gstreamer_video::VideoMeta>(None);
+                                }
+                            }
+                            gstreamer::PadProbeReturn::Ok
+                        });
+                    }
+                }
+            }
             let bin = gstreamer::Bin::new();
             bin.add_many([&post, appsink.upcast_ref::<gstreamer::Element>()]).ok()?;
             post.link(appsink).ok()?;
