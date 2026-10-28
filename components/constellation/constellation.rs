@@ -1054,13 +1054,36 @@ where
             target_snapshot_params,
             frame_name: name,
         };
+        // (Kyousei) 子が最初の通知を送る前に、受け持つ面に足す(`Pipeline::spawn` が、子へ作成を頼む)。取り除くのは `handle_pipeline_exited`。
+        let top_level = browsing_context_id == BrowsingContextId::from(webview_id);
+        event_loop.owned.lock().unwrap().add(webview_id, top_level);
+        let spawn_event_loop = event_loop.clone();
         let pipeline = match Pipeline::spawn(new_pipeline_info, event_loop, self, webview_hidden) {
             Ok(pipeline) => pipeline,
-            Err(error) => return self.handle_send_error(new_pipeline_id, error),
+            Err(error) => {
+                spawn_event_loop
+                    .owned
+                    .lock()
+                    .unwrap()
+                    .remove(webview_id, top_level);
+                return self.handle_send_error(new_pipeline_id, error);
+            },
         };
 
         assert!(!self.pipelines.contains_key(&new_pipeline_id));
         self.pipelines.insert(new_pipeline_id, pipeline);
+    }
+
+    /// (Kyousei) このパイプラインの面を、そのコンテンツプロセスが受け持つ面に足す(`net_guard::OwnedViews`)。
+    /// 取り除くのは `handle_pipeline_exited`。
+    fn register_owned_view(pipeline: &Pipeline) {
+        let top_level = pipeline.browsing_context_id == BrowsingContextId::from(pipeline.webview_id);
+        pipeline
+            .event_loop
+            .owned
+            .lock()
+            .unwrap()
+            .add(pipeline.webview_id, top_level);
     }
 
     /// Get an iterator for the fully active browsing contexts in a subtree.
@@ -3008,6 +3031,11 @@ where
         let Some(pipeline) = self.pipelines.remove(&pipeline_id) else {
             return;
         };
+        // (Kyousei) 受け持つ面から外す。
+        pipeline.event_loop.owned.lock().unwrap().remove(
+            pipeline.webview_id,
+            pipeline.browsing_context_id == BrowsingContextId::from(pipeline.webview_id),
+        );
 
         // Clean up any registered interests for this pipeline.
         self.pipeline_interests.retain(|_, set| {
@@ -3714,6 +3742,7 @@ where
         );
 
         assert!(!self.pipelines.contains_key(&new_pipeline_id));
+        Self::register_owned_view(&pipeline);
         self.pipelines.insert(new_pipeline_id, pipeline);
 
         if let Some(webview) = self.webviews.get_mut(&webview_id) {
@@ -3801,6 +3830,8 @@ where
             false, /* hidden */
             load_data,
         );
+        // (Kyousei) 新しい面の最初の通知が検問に落とされないよう、返事の前に足す。
+        Self::register_owned_view(&pipeline);
         let _ = response_sender.send(Some(AuxiliaryWebViewCreationResponse {
             new_webview_id,
             new_pipeline_id,

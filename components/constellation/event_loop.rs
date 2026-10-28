@@ -38,6 +38,8 @@ pub struct EventLoop {
     background_hang_monitor_sender: Option<GenericSender<BackgroundHangMonitorControlMsg>>,
     /// (Kyousei) この event loop(コンテンツプロセス)が受け持つサイト。`net_guard.rs`。
     pub(crate) sites: crate::net_guard::Sites,
+    /// (Kyousei) この event loop が、パイプラインを持つ面。`net_guard.rs` の `OwnedViews`。
+    pub(crate) owned: crate::net_guard::Owned,
     dont_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -75,7 +77,21 @@ impl EventLoop {
 
         let embedder_chan = constellation.embedder_proxy.sender.clone();
         let eventloop_waker = constellation.embedder_proxy.event_loop_waker.clone();
-        let script_to_embedder_sender = ScriptToEmbedderChan::new(embedder_chan, eventloop_waker);
+        // (Kyousei) マルチプロセスでは、子から埋め込み側への通知の面を、親の側で検査する(`net_guard::embedder_msg_allowed`)。
+        let owned = crate::net_guard::Owned::default();
+        #[cfg(feature = "multiprocess")]
+        let guard_embedder =
+            opts::get().multiprocess && std::env::var("KYOUSEI_NET_GUARD").as_deref() != Ok("0");
+        #[cfg(not(feature = "multiprocess"))]
+        let guard_embedder = false;
+        let script_to_embedder_sender = if guard_embedder {
+            let owned = owned.clone();
+            ScriptToEmbedderChan::new_filtered(embedder_chan, eventloop_waker, move |msg| {
+                crate::net_guard::embedder_msg_allowed(&owned, msg)
+            })
+        } else {
+            ScriptToEmbedderChan::new(embedder_chan, eventloop_waker)
+        };
 
         let resource_threads = if is_private {
             constellation.private_resource_threads.clone()
@@ -141,12 +157,12 @@ impl EventLoop {
 
         #[cfg(feature = "multiprocess")]
         let event_loop = if opts::get().multiprocess {
-            Self::spawn_in_process(constellation, initial_script_state, sites)?
+            Self::spawn_in_process(constellation, initial_script_state, sites, owned)?
         } else {
-            Self::spawn_in_thread(constellation, initial_script_state, sites)
+            Self::spawn_in_thread(constellation, initial_script_state, sites, owned)
         };
         #[cfg(not(feature = "multiprocess"))]
-        let event_loop = Self::spawn_in_thread(constellation, initial_script_state, sites);
+        let event_loop = Self::spawn_in_thread(constellation, initial_script_state, sites, owned);
 
         let event_loop = Rc::new(event_loop);
         constellation.add_event_loop(&event_loop);
@@ -157,6 +173,7 @@ impl EventLoop {
         constellation: &mut Constellation<STF, SWF>,
         initial_script_state: InitialScriptState,
         sites: crate::net_guard::Sites,
+        owned: crate::net_guard::Owned,
     ) -> Self {
         let script_chan = initial_script_state.constellation_to_script_sender.clone();
         let id = initial_script_state.id;
@@ -177,6 +194,7 @@ impl EventLoop {
             id,
             background_hang_monitor_sender: None,
             sites,
+            owned,
             dont_send_or_sync: PhantomData,
         }
     }
@@ -186,6 +204,7 @@ impl EventLoop {
         constellation: &mut Constellation<STF, SWF>,
         initial_script_state: InitialScriptState,
         sites: crate::net_guard::Sites,
+        owned: crate::net_guard::Owned,
     ) -> Result<Self, SendError> {
         let script_chan = initial_script_state.constellation_to_script_sender.clone();
         let id = initial_script_state.id;
@@ -217,6 +236,7 @@ impl EventLoop {
             id,
             background_hang_monitor_sender: Some(background_hand_monitor_sender),
             sites,
+            owned,
             dont_send_or_sync: PhantomData,
         })
     }

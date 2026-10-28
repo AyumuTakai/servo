@@ -1165,6 +1165,16 @@ impl ScriptToEmbedderChan {
         embedder_chan: Sender<EmbedderMsg>,
         waker: Box<dyn EventLoopWaker>,
     ) -> ScriptToEmbedderChan {
+        Self::new_filtered(embedder_chan, waker, |_| true)
+    }
+
+    /// (Kyousei) `new` に、親の側で動く検問を足す。`filter` が偽を返したメッセージは捨てる。
+    /// コンテンツプロセス(子)は、メッセージの中の面(`WebViewId`)を申告するので、乗っ取られた子が、別の面になりすますのを防ぐ。
+    pub fn new_filtered(
+        embedder_chan: Sender<EmbedderMsg>,
+        waker: Box<dyn EventLoopWaker>,
+        mut filter: impl FnMut(&EmbedderMsg) -> bool + Send + 'static,
+    ) -> ScriptToEmbedderChan {
         let embedder_callback = GenericCallback::new(move |embedder_msg| {
             let msg = match embedder_msg {
                 Ok(embedder_msg) => embedder_msg,
@@ -1173,6 +1183,10 @@ impl ScriptToEmbedderChan {
                     return;
                 },
             };
+            if !filter(&msg) {
+                log::warn!("Dropped an embedder message from a content process: {msg:?}");
+                return;
+            }
             let _ = embedder_chan.send(msg);
             waker.wake();
         })
