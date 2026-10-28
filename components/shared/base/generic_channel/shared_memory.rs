@@ -50,6 +50,11 @@ impl MallocSizeOf for GenericSharedMemory {
 }
 
 impl GenericSharedMemory {
+    /// Whether the bytes live in memory shared with another process (and so are not copied when read in place).
+    pub fn is_ipc(&self) -> bool {
+        matches!(self.0, GenericSharedMemoryVariant::Ipc(_))
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Self {
         if use_ipc() {
             GenericSharedMemory(GenericSharedMemoryVariant::Ipc(

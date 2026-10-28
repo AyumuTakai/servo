@@ -25,7 +25,7 @@ use paint_api::rendering_context::RenderingContext;
 use paint_api::viewport_description::ViewportDescription;
 use paint_api::{
     ImageUpdate, PipelineExitSource, SendableFrameTree, SerializableDisplayListPayload,
-    SerializableImageData, WebRenderExternalImageHandlers, WebRenderImageHandlerType, WebViewTrait,
+    SerializableImageData, SharedImageBuffers, WebRenderExternalImageHandlers, WebRenderImageHandlerType, WebViewTrait,
 };
 use profile_traits::time::{ProfilerCategory, ProfilerChan};
 use profile_traits::time_profile;
@@ -77,6 +77,9 @@ use crate::webview_renderer::{PinchZoomResult, ScrollResult, UnknownWebView, Web
 /// Each [`Painter`] also has its own [`RefreshDriver`] as well, which may be shared with
 /// other [`Painter`]s. It's up to the embedder to decide which [`RefreshDriver`]s are associated
 /// with a particular [`RenderingContext`].
+/// Updated images smaller than this are copied as before.
+const SHARED_BUFFER_MIN_BYTES: usize = 256 * 1024;
+
 pub(crate) struct Painter {
     /// The [`RenderingContext`] instance that webrender targets, which is the viewport.
     pub(crate) rendering_context: Rc<dyn RenderingContext>,
@@ -122,6 +125,9 @@ pub(crate) struct Painter {
     /// arrive before requesting a new frame, as these happen asynchronously with
     /// `ScriptThread` display list construction.
     pub(crate) frame_delayer: FrameDelayer,
+
+    /// Video frames (and other updated images) that arrived in shared memory, which WebRender reads in place.
+    shared_buffers: SharedImageBuffers,
 
     /// The channel on which messages can be sent to the constellation.
     embedder_to_constellation_sender: Sender<EmbedderToConstellationMessage>,
@@ -265,6 +271,7 @@ impl Painter {
         )
         .expect("Unable to initialize WebRender.");
 
+        let shared_buffers = external_image_handlers.shared_buffers();
         webrender_renderer.set_external_image_handler(external_image_handlers);
 
         let webrender_api = webrender_api_sender.create_api_by_client(painter_id.into());
@@ -275,6 +282,7 @@ impl Painter {
         info!("Running on {gl_renderer} with OpenGL version {gl_version}");
 
         let painter = Painter {
+            shared_buffers,
             painter_id,
             embedder_to_constellation_sender,
             webview_renderers: Default::default(),
@@ -1117,12 +1125,23 @@ impl Painter {
                     txn.delete_image(key);
                     self.frame_delayer.delete_image(key);
                     self.animation_image_cache.remove(&key);
+                    self.shared_buffers.forget(key);
                 },
                 ImageUpdate::UpdateImage(key, desc, data, epoch) => {
                     if let Some(epoch) = epoch {
                         self.frame_delayer.update_image(key, epoch);
                     }
-                    txn.update_image(key, desc, data.into(), &DirtyRect::All)
+                    // Frames big enough to matter (video) are read by WebRender straight from the shared
+                    // memory the other process filled, not copied into a `Vec` first.
+                    let data = match data {
+                        SerializableImageData::Raw(memory)
+                            if memory.is_ipc() && memory.len() >= SHARED_BUFFER_MIN_BYTES =>
+                        {
+                            ImageData::External(self.shared_buffers.publish(key, memory))
+                        },
+                        data => data.into(),
+                    };
+                    txn.update_image(key, desc, data, &DirtyRect::All)
                 },
                 ImageUpdate::UpdateImageForAnimation(image_key, desc) => {
                     let Some(image) = self.animation_image_cache.get(&image_key) else {
