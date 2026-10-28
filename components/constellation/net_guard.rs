@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use log::warn;
-use net_traits::request::Origin;
+use net_traits::request::{Destination, Origin};
 use net_traits::{CoreResourceMsg, CoreResourceThread};
 use servo_base::generic_channel;
 use servo_url::{ImmutableOrigin, ServoUrl};
@@ -71,6 +71,16 @@ fn allowed(sites: &Sites, msg: &CoreResourceMsg) -> bool {
     use CoreResourceMsg::*;
     match msg {
         Fetch(builder, _) | FetchRedirect(builder, ..) => {
+            // ページの移動(ドキュメント・フレーム)は、送り主(origin)が移動元(別のサイト)になる。移動の取得は、
+            // その子が受け持つサイトのページを読み込むもの(取得する URL か、リダイレクトの前の URL が、受け持つサイト)だけ通す。
+            let navigation = matches!(
+                builder.destination,
+                Destination::Document | Destination::IFrame | Destination::Frame
+            );
+            if navigation {
+                return url_allowed(sites, &builder.url) ||
+                    builder.url_list.iter().any(|u| url_allowed(sites, u));
+            }
             origin_allowed(sites, &builder.origin) &&
                 builder
                     .client
@@ -110,7 +120,21 @@ pub(crate) fn guarded(core: CoreResourceThread, sites: Sites) -> CoreResourceThr
     std::thread::Builder::new()
         .name("NetGuard".to_owned())
         .spawn(move || {
-            while let Ok(msg) = receiver.recv() {
+            let trace = std::env::var("KYOUSEI_NET_GUARD_TRACE").as_deref() == Ok("1");
+            warn!("net guard: 中継を始めた(trace={trace})");
+            loop {
+                let msg = match receiver.recv() {
+                    Ok(msg) => msg,
+                    Err(servo_base::generic_channel::ReceiveError::Disconnected) => break,
+                    Err(e) => {
+                        warn!("net guard: 受信に失敗(読み捨てて続ける): {e:?}");
+                        continue;
+                    },
+                };
+                if trace {
+                    let d = format!("{msg:?}");
+                    warn!("net guard trace: {}", d.chars().take(160).collect::<String>());
+                }
                 if allowed(&sites, &msg) {
                     if core.send(msg).is_err() {
                         break;

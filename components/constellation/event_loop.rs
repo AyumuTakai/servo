@@ -85,7 +85,9 @@ impl EventLoop {
         // (Kyousei) マルチプロセスでは、子から親の net スレッドへの要求に、検問を挟む(`net_guard.rs`)。
         let sites = crate::net_guard::Sites::default();
         #[cfg(feature = "multiprocess")]
-        let resource_threads = if opts::get().multiprocess {
+        let resource_threads = if opts::get().multiprocess &&
+            std::env::var("KYOUSEI_NET_GUARD").as_deref() != Ok("0")
+        {
             ResourceThreads::new(crate::net_guard::guarded(
                 resource_threads.core_thread.clone(),
                 sites.clone(),
