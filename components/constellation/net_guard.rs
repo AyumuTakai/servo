@@ -374,6 +374,24 @@ mod tests {
     }
 
     #[test]
+    fn a_browsing_context_query_is_sent_as_the_senders_own_pipeline_and_checked_like_any_other() {
+        let (w1, p1) = ids();
+        let (w2, p2) = ids();
+        let (_, remote) = ids();
+        let owned = Owned::default();
+        owned.lock().unwrap().add(w1, p1, false);
+        let query = |w, sender| {
+            let (tx, _rx) = generic_channel::channel().unwrap();
+            (w, sender, ScriptToConstellationMessage::GetBrowsingContextInfo(remote, tx))
+        };
+        // 送り主の欄は自分のパイプライン。問う相手(別のプロセスの親)は、メッセージ本体。
+        assert!(constellation_msg_allowed(&owned, &query(w1, p1)));
+        // 他の子の面・パイプラインを名乗る問い合わせは、ほかのメッセージと同じく捨てる。
+        assert!(!constellation_msg_allowed(&owned, &query(w2, p2)));
+        assert!(!constellation_msg_allowed(&owned, &query(w1, remote)));
+    }
+
+    #[test]
     fn a_child_only_owns_the_pipelines_and_views_it_was_given() {
         let (w1, p1) = ids();
         let (w2, p2) = ids();

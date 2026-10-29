@@ -65,7 +65,12 @@ impl ScriptWindowProxies {
         opener: Option<BrowsingContextId>,
     ) -> Option<DomRoot<WindowProxy>> {
         let (browsing_context_id, parent_pipeline_id) =
-            self.ask_constellation_for_browsing_context_info(senders, webview_id, pipeline_id)?;
+            self.ask_constellation_for_browsing_context_info(
+                senders,
+                webview_id,
+                global_to_clone.pipeline_id(),
+                pipeline_id,
+            )?;
         if let Some(window_proxy) = self.find_window_proxy(browsing_context_id) {
             return Some(window_proxy);
         }
@@ -155,13 +160,14 @@ impl ScriptWindowProxies {
         &self,
         senders: &ScriptThreadSenders,
         webview_id: WebViewId,
+        sender_pipeline_id: PipelineId,
         pipeline_id: PipelineId,
     ) -> Option<(BrowsingContextId, Option<PipelineId>)> {
         let (result_sender, result_receiver) = generic_channel::channel().unwrap();
         let msg = ScriptToConstellationMessage::GetBrowsingContextInfo(pipeline_id, result_sender);
         senders
             .pipeline_to_constellation_sender
-            .send((webview_id, pipeline_id, msg))
+            .send((webview_id, sender_pipeline_id, msg))
             .expect("Failed to send to constellation.");
         result_receiver
             .recv()
