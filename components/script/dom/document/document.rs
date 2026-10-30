@@ -3393,7 +3393,11 @@ impl Document {
         depth: &ResizeObservationDepth,
     ) -> bool {
         let mut has_active_resize_observations = false;
-        for observer in self.resize_observers.borrow_mut().iter_mut() {
+        // Shared borrow, not `borrow_mut`: computing the observation's box size
+        // triggers a reflow, which can allocate DOM objects and run a GC. The GC
+        // traces `resize_observers` (a shared borrow), so a mutable borrow held here
+        // would panic with "RefCell already mutably borrowed".
+        for observer in self.resize_observers.borrow().iter() {
             observer.gather_active_resize_observations_at_depth(
                 no_gc,
                 depth,
