@@ -36,11 +36,11 @@ impl RequestInterceptor {
     fn read_body_if_wanted(request: &Request) -> Result<Option<Vec<u8>>, NetworkError> {
         let prefs = servo_config::prefs::get();
         let wanted = &prefs.network_intercept_body_host;
-        if wanted.is_empty() || request.url().host_str() != Some(wanted.as_str()) {
+        if wanted.is_empty() || request.current_url().host_str() != Some(wanted.as_str()) {
             return Ok(None);
         }
         let same_origin =
-            matches!(&request.origin, Origin::Origin(origin) if *origin == request.url().origin());
+            matches!(&request.origin, Origin::Origin(origin) if *origin == request.current_url().origin());
         if !same_origin {
             return Ok(None);
         }

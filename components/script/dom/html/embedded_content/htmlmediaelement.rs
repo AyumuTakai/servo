@@ -4969,10 +4969,6 @@ impl HTMLMediaElementEventHandler {
             return;
         }
 
-        if !matches!(
-            event,
-            PlayerEvent::PositionChanged(_) | PlayerEvent::VideoFrameUpdated
-        ) {}
         match event {
             PlayerEvent::DurationChanged(duration) => element.playback_duration_changed(duration),
             PlayerEvent::EndOfStream => element.playback_end(cx),
