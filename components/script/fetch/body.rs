@@ -209,6 +209,14 @@ impl TransmitBodyConnectHandler {
     fn start_reading(&mut self, sender: IpcSender<BodyChunkResponse>) {
         self.bytes_sender = Some(sender);
 
+        // A body that is in memory can be transmitted again: a history traversal to the result of a
+        // POST navigation sends the same request (and body) once more. Without this reset, the
+        // second transmission would end at once with no chunk, and the request would hang until the
+        // server times out (its `Content-Length` promises the body).
+        if self.in_memory.is_some() {
+            self.in_memory_done = false;
+        }
+
         // If we're using an actual ReadableStream, acquire a reader for it.
         if self.source == BodySource::Null {
             let stream = self.stream.clone();
