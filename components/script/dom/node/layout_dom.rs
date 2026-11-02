@@ -304,9 +304,14 @@ impl<'dom> LayoutDom<'dom, Node> {
     pub(crate) fn text_node_paints_caret(&self) -> bool {
         if let Some(shadow_root) = self.containing_shadow_root_for_layout() {
             let host = shadow_root.get_host_for_layout();
-            if host.is::<HTMLInputElement>() || host.is::<HTMLTextAreaElement>() {
+            if let Some(input) = host.downcast::<HTMLInputElement>() {
                 // This is the cases where, if `selection_for_text_node` returns a selection
-                // it is a `TextInput` selection
+                // it is a `TextInput` selection. Inputs that are not text entries (checkbox,
+                // radio, ...) have no caret: their empty text node must not get an empty text
+                // run that paints one.
+                return input.is_textual_or_password_for_layout();
+            }
+            if host.is::<HTMLTextAreaElement>() {
                 return true;
             }
         }

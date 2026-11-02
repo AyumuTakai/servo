@@ -909,6 +909,12 @@ impl<'dom> LayoutDom<'dom, HTMLInputElement> {
         self.unsafe_get().size.get()
     }
 
+    /// Whether the input is a text entry (the types whose shadow tree holds an inner editor that can
+    /// paint a caret). Checkboxes, radio buttons, buttons and so on have no caret.
+    pub(crate) fn is_textual_or_password_for_layout(self) -> bool {
+        self.unsafe_get().is_textual_or_password.get()
+    }
+
     pub(crate) fn selection_for_layout(self) -> Option<RangeAny<Utf32CodeUnits>> {
         let element = self.unsafe_get();
         if !element.is_textual_or_password.get() {
