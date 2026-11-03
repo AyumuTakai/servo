@@ -101,6 +101,7 @@ use crate::realms::enter_auto_realm;
 use crate::runtime::script_runtime::IntroductionType;
 
 mod async_html;
+mod errorpage;
 pub(crate) mod encoding;
 pub(crate) mod html;
 mod prefetch;
@@ -949,6 +950,10 @@ pub(crate) struct ParserContext {
     /// Set when this response is a download (attachment or undisplayable type): the body goes to a
     /// file instead of the parser.
     download: Option<DownloadSink>,
+    /// The HTTP status of the response, and whether any body bytes arrived: a main-frame error status
+    /// with no body gets the error page (like other browsers), not a blank page.
+    http_status: Option<u16>,
+    body_received: bool,
 }
 
 /// Static id source for downloads.
@@ -1069,6 +1074,8 @@ impl ParserContext {
             source_origin,
             document: None,
             download: None,
+            http_status: None,
+            body_received: false,
         }
     }
 
@@ -1457,6 +1464,10 @@ impl ParserContext {
                 Some(error),
             ),
         };
+        self.http_status = metadata
+            .as_ref()
+            .filter(|_| error.is_none())
+            .map(|metadata| metadata.status.code().as_u16());
         let content_type: Option<Mime> = metadata
             .clone()
             .and_then(|meta| meta.content_type)
@@ -1618,13 +1629,25 @@ impl ParserContext {
                     let page = page.replace("${bytes}", encoded_bytes.as_str());
                     page.replace("${secret}", &net_traits::PRIVILEGED_SECRET.to_string())
                 },
-                NetworkError::BlobURLStoreError(reason) |
-                NetworkError::WebsocketConnectionFailure(reason) |
-                NetworkError::HttpError(reason) |
-                NetworkError::ResourceLoadError(reason) |
-                NetworkError::MimeType(reason) => {
+                NetworkError::BlobURLStoreError(reason) | NetworkError::MimeType(reason) => {
                     let page = resources::read_string(Resource::NetErrorHTML);
-                    page.replace("${reason}", &reason)
+                    errorpage::network_error_page(
+                        &page,
+                        self.url.as_str(),
+                        self.url.host_str(),
+                        &NetworkError::ResourceLoadError(reason),
+                    )
+                },
+                NetworkError::WebsocketConnectionFailure(_) |
+                NetworkError::HttpError(_) |
+                NetworkError::ResourceLoadError(_) => {
+                    let page = resources::read_string(Resource::NetErrorHTML);
+                    errorpage::network_error_page(
+                        &page,
+                        self.url.as_str(),
+                        self.url.host_str(),
+                        &error,
+                    )
                 },
                 NetworkError::Crash(details) => {
                     let page = resources::read_string(Resource::CrashHTML);
@@ -1655,7 +1678,12 @@ impl ParserContext {
                 NetworkError::ProtocolHandlerSubstitutionError |
                 NetworkError::DecompressionError => {
                     let page = resources::read_string(Resource::NetErrorHTML);
-                    page.replace("${reason}", &format!("{:?}", error))
+                    errorpage::network_error_page(
+                        &page,
+                        self.url.as_str(),
+                        self.url.host_str(),
+                        &error,
+                    )
                 },
                 NetworkError::LoadCancelled => {
                     // The next load will show a page
@@ -1743,6 +1771,9 @@ impl ParserContext {
         if self.is_synthesized_document {
             return;
         }
+        if !payload.is_empty() {
+            self.body_received = true;
+        }
         let Some(parser) = self.parser.as_ref().map(|p| p.root()) else {
             return;
         };
@@ -1805,11 +1836,26 @@ impl ParserContext {
         let mut realm = enter_auto_realm(cx, &*document);
         let cx = &mut realm;
 
-        if status.is_ok() {
+        let status_ok = status.is_ok();
+        if status_ok {
             document.set_resource_fetch_timing(timing);
         }
 
-        if let Some(parser) = parser {
+        // A main-frame response with an HTTP error status and no body: show the error page, as
+        // other browsers do, instead of a blank page.
+        let error_status = self.http_status.filter(|status| {
+            *status >= 400 && self.parent_info.is_none() && !self.body_received && status_ok
+        });
+        if let (Some(status), Some(parser)) = (error_status, parser.as_ref()) {
+            let page = resources::read_string(Resource::NetErrorHTML);
+            let page = errorpage::http_status_page(
+                &page,
+                self.url.as_str(),
+                self.url.host_str(),
+                status,
+            );
+            self.load_inline_unknown_content(cx, parser, page);
+        } else if let Some(parser) = parser {
             parser.last_chunk_received.set(true);
             if !parser.suspended.get() {
                 parser.parse_sync(cx);

@@ -1320,7 +1320,14 @@ impl NetworkError {
     }
 
     pub fn from_hyper_error(error: &HyperError, certificate: Option<CertificateDer>) -> Self {
-        let error_string = error.to_string();
+        // Include the causes (name not resolved, connection refused, ...) that the error page shows.
+        let mut error_string = error.to_string();
+        let mut source = std::error::Error::source(error);
+        while let Some(cause) = source {
+            error_string.push_str(": ");
+            error_string.push_str(&cause.to_string());
+            source = cause.source();
+        }
         match certificate {
             Some(certificate) => NetworkError::SslValidation(error_string, certificate.to_vec()),
             _ => NetworkError::HttpError(error_string),
