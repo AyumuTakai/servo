@@ -1006,7 +1006,7 @@ where
         // here, because it will be send on an ipc channel,
         // and ipc channels take onership of their data.
         // https://github.com/servo/ipc-channel/issues/138
-        load_data: LoadData,
+        mut load_data: LoadData,
         is_private: bool,
         target_snapshot_params: TargetSnapshotParams,
         name: Option<String>,
@@ -1014,6 +1014,8 @@ where
         if self.shutting_down {
             return;
         }
+
+        self.limit_new_content_processes(webview_id, opener, parent_pipeline_id, &mut load_data);
 
         debug!("Creating new pipeline ({new_pipeline_id:?}) in {browsing_context_id}");
         let (webview_hidden, webview_state) = {
@@ -1076,6 +1078,70 @@ where
 
         assert!(!self.pipelines.contains_key(&new_pipeline_id));
         self.pipelines.insert(new_pipeline_id, pipeline);
+    }
+
+    /// (Kyousei) iframe が、新しいコンテンツプロセスを必要とするとき、プロセスの数の上限(面ごと・全体)を超えるなら、
+    /// その iframe の中身を `about:blank` にする(親と同じプロセスで動くので、プロセスは増えない。分離は弱めない)。
+    /// 広告の iframe が、数十個のプロセスを一度に起こして、fd・メモリを使い切り、全体を巻き込むのを防ぐ(既知の不具合 96)。
+    /// 最上位のページ(`parent_pipeline_id` が無い)・竟成OS のシェル(`app.localhost`)は、数えず、止めない。
+    /// 上限は、環境変数 `KYOUSEI_MAX_PROCS_PER_VIEW`(既定 32)・`KYOUSEI_MAX_PROCS_TOTAL`(既定 128)。
+    fn limit_new_content_processes(
+        &self,
+        webview_id: WebViewId,
+        opener: Option<BrowsingContextId>,
+        parent_pipeline_id: Option<PipelineId>,
+        load_data: &mut LoadData,
+    ) {
+        if parent_pipeline_id.is_none() || !opts::get().multiprocess {
+            return;
+        }
+        let url = load_data.url.as_str();
+        if url == "about:blank" || url == "about:srcdoc" {
+            return;
+        }
+        let sandboxed = load_data
+            .creation_sandboxing_flag_set
+            .contains(SandboxingFlagSet::SANDBOXED_ORIGIN_BROWSING_CONTEXT_FLAG);
+        let domain = if sandboxed {
+            None
+        } else {
+            registered_domain_name(&load_data.url)
+        };
+        if self
+            .get_event_loop_for_new_pipeline(load_data, webview_id, opener, parent_pipeline_id, &domain)
+            .is_some()
+        {
+            return; // 既存のプロセスを使う(新しいプロセスは増えない)
+        }
+        fn limit(name: &str, default: usize) -> usize {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        }
+        let max_view = limit("KYOUSEI_MAX_PROCS_PER_VIEW", 32);
+        let max_total = limit("KYOUSEI_MAX_PROCS_TOTAL", 128);
+        let mut total = std::collections::HashSet::new();
+        let mut in_view = std::collections::HashSet::new();
+        for pipeline in self.pipelines.values() {
+            let event_loop = &*pipeline.event_loop;
+            if crate::net_guard::host_key_allowed(&event_loop.sites, "app.localhost") {
+                continue; // シェルのプロセスは数えない
+            }
+            total.insert(event_loop);
+            if pipeline.webview_id == webview_id {
+                in_view.insert(event_loop);
+            }
+        }
+        if in_view.len() >= max_view || total.len() >= max_total {
+            warn!(
+                "Too many content processes (view {}/{max_view}, total {}/{max_total}); loading about:blank instead of {}",
+                in_view.len(),
+                total.len(),
+                load_data.url
+            );
+            load_data.url = ServoUrl::parse("about:blank").expect("about:blank");
+        }
     }
 
     /// (Kyousei) このパイプラインの面を、そのコンテンツプロセスが受け持つ面に足す(`net_guard::OwnedViews`)。
