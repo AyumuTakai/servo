@@ -1134,7 +1134,9 @@ where
             }
         }
         if in_view.len() >= max_view || total.len() >= max_total {
+            // (RUST_LOG で `servo_constellation=error` にしているので、別の target で出す)
             warn!(
+                target: "kyousei_proc_limit",
                 "Too many content processes (view {}/{max_view}, total {}/{max_total}); loading about:blank instead of {}",
                 in_view.len(),
                 total.len(),
