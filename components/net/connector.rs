@@ -659,5 +659,9 @@ pub fn create_http_client(tls_config: TlsConfig) -> ServoClient {
 
     Client::builder(TokioExecutor {})
         .http1_title_case_headers(true)
+        // hyper's default (16 KiB) is far below what real sites send: YouTube's HTML response
+        // carries ~12 KiB of encoded headers, which h2 counts as more than 16 KiB decoded and
+        // then resets the stream with PROTOCOL_ERROR. Browsers advertise 256 KiB or more.
+        .http2_max_header_list_size(256 * 1024)
         .build(InstrumentedConnector::from(connector))
 }
