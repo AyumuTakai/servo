@@ -152,10 +152,24 @@ impl GstMediaDevices {
             ("audio/x-raw", "Audio/Source")
         };
         let caps = into_caps(constraints, format)?;
-        let device = probe_devices().into_iter().find(|d| {
+        // 向き(前面・背面)を選ぶ API(`deviceId`・`facingMode`)は、まだ無い。組み込み側が、機器の名前に含まれる文字列で、先に選ぶ機器を指定できる
+        // (環境変数 `SERVO_MEDIA_CAPTURE_PREFER`。例:`Front`)。無ければ、見つかった順。
+        let prefer = std::env::var("SERVO_MEDIA_CAPTURE_PREFER").ok();
+        let mut candidates = probe_devices().into_iter().filter(|d| {
             d.device_class().as_str() == class &&
                 d.caps().is_none_or(|device_caps| device_caps.can_intersect(&caps))
-        })?;
+        });
+        let device = match prefer.as_deref().filter(|p| !p.is_empty()) {
+            Some(prefer) => {
+                let all: Vec<_> = candidates.collect();
+                let index = all
+                    .iter()
+                    .position(|d| d.display_name().contains(prefer))
+                    .unwrap_or(0);
+                all.into_iter().nth(index)?
+            },
+            None => candidates.next()?,
+        };
         let element = device.create_element(None).ok()?;
         Some(GstMediaTrack { element })
     }
